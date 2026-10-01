@@ -1,7 +1,7 @@
 diff --git a/plugins/win-dshow/CMakeLists.txt b/plugins/win-dshow/CMakeLists.txt
 --- a/plugins/win-dshow/CMakeLists.txt
 +++ b/plugins/win-dshow/CMakeLists.txt
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
  cmake_minimum_required(VERSION 3.28...3.30)
  
 -find_package(FFmpeg REQUIRED avcodec avutil)
@@ -9,7 +9,7 @@ diff --git a/plugins/win-dshow/CMakeLists.txt b/plugins/win-dshow/CMakeLists.txt
  
  add_library(win-dshow MODULE)
  add_library(OBS::dshow ALIAS win-dshow)
-@@ -21,7 +21,7 @@ target_sources(
+@@ -21,5 +21,5 @@ target_sources(
    win-dshow
 -  PRIVATE dshow-plugin.cpp encode-dstr.hpp ffmpeg-decode.c ffmpeg-decode.h win-dshow-encoder.cpp win-dshow.cpp
 +  PRIVATE dshow-plugin.cpp encode-dstr.hpp ffmpeg-decode.c ffmpeg-decode.h mjpeg-recorder.cpp mjpeg-recorder.hpp win-dshow-encoder.cpp win-dshow.cpp
@@ -28,7 +28,7 @@ diff --git a/plugins/win-dshow/mjpeg-recorder.hpp b/plugins/win-dshow/mjpeg-reco
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.hpp
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -60,7 +60,7 @@ diff --git a/plugins/win-dshow/mjpeg-recorder.cpp b/plugins/win-dshow/mjpeg-reco
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.cpp
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,178 @@
 +#include "mjpeg-recorder.hpp"
 +
 +#include <obs-module.h>
@@ -258,7 +258,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  	bool deactivateWhenNotShowing = false;
  	bool deviceHasAudio = false;
  	bool deviceHasSeparateAudioFilter = false;
-@@ -452,6 +454,8 @@
+@@ -452,5 +454,8 @@
  void DShowInput::OnEncodedVideoData(enum AVCodecID id, unsigned char *data, size_t size, long long ts)
  {
 +	if (id == AV_CODEC_ID_MJPEG && mjpeg_recorder.Active())
@@ -267,7 +267,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  	/* If format or hw decode changes, recreate the decoder */
  	if (ffmpeg_decode_valid(video_decoder) &&
  	    ((video_decoder->codec->id != id) || (video_decoder->hw != hw_decode))) {
-@@ -1054,6 +1058,8 @@
+@@ -1054,5 +1058,7 @@
  inline bool DShowInput::Activate(obs_data_t *settings)
  {
 +	mjpeg_recorder.Stop();
@@ -275,7 +275,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  	if (!device.ResetGraph()) {
  		obs_source_set_audio_active(source, false);
  		return false;
-@@ -1076,6 +1082,11 @@
+@@ -1076,6 +1082,13 @@
  	if (device.Start() != Result::Success) {
  		return false;
  	}
@@ -289,20 +289,20 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  
  	cs = GetColorSpace(settings);
  	const enum video_range_type range = GetColorRange(settings);
-@@ -1111,6 +1122,7 @@
+@@ -1111,5 +1122,6 @@
  inline void DShowInput::Deactivate()
  {
 +	mjpeg_recorder.Stop();
  	device.ResetGraph();
  	obs_source_output_video2(source, nullptr);
  }
-@@ -1164,6 +1176,8 @@
+@@ -1164,3 +1176,5 @@
  	obs_data_set_default_bool(settings, AUTOROTATION, true);
  	obs_data_set_default_bool(settings, HW_DECODE, false);
 +	obs_data_set_default_bool(settings, "native_mjpeg_record", false);
 +	obs_data_set_default_string(settings, "native_mjpeg_record_dir", "");
  }
-@@ -1859,6 +1873,12 @@
+@@ -1859,6 +1873,11 @@
  	obs_properties_add_bool(ppts, AUTOROTATION, TEXT_AUTOROTATION);
  
  	obs_properties_add_bool(ppts, HW_DECODE, TEXT_HW_DECODE);
@@ -317,7 +317,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
 diff --git a/plugins/win-dshow/data/locale/en-US.ini b/plugins/win-dshow/data/locale/en-US.ini
 --- a/plugins/win-dshow/data/locale/en-US.ini
 +++ b/plugins/win-dshow/data/locale/en-US.ini
-@@ -25,6 +25,8 @@
+@@ -25,7 +25,9 @@
  Autorotation="Apply rotation data from camera (if any)"
  HardwareDecode="Use hardware decoding when available"
  DeactivateWhenNotShowing="Deactivate when not showing"
