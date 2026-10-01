@@ -1,0 +1,328 @@
+diff --git a/plugins/win-dshow/CMakeLists.txt b/plugins/win-dshow/CMakeLists.txt
+--- a/plugins/win-dshow/CMakeLists.txt
++++ b/plugins/win-dshow/CMakeLists.txt
+@@ -1,5 +1,5 @@
+ cmake_minimum_required(VERSION 3.28...3.30)
+ 
+-find_package(FFmpeg REQUIRED avcodec avutil)
++find_package(FFmpeg REQUIRED avcodec avformat avutil)
+ 
+ add_library(win-dshow MODULE)
+ add_library(OBS::dshow ALIAS win-dshow)
+@@ -21,7 +21,7 @@ target_sources(
+   win-dshow
+-  PRIVATE dshow-plugin.cpp encode-dstr.hpp ffmpeg-decode.c ffmpeg-decode.h win-dshow-encoder.cpp win-dshow.cpp
++  PRIVATE dshow-plugin.cpp encode-dstr.hpp ffmpeg-decode.c ffmpeg-decode.h mjpeg-recorder.cpp mjpeg-recorder.hpp win-dshow-encoder.cpp win-dshow.cpp
+ )
+ 
+ configure_file(cmake/windows/obs-module.rc.in win-dshow.rc)
+@@ -35,6 +35,7 @@ target_link_libraries(
+     OBS::shared-memory-queue
+     OBS::winhandle
+     FFmpeg::avcodec
++    FFmpeg::avformat
+     FFmpeg::avutil
+     strmiids
+     winmm
+diff --git a/plugins/win-dshow/mjpeg-recorder.hpp b/plugins/win-dshow/mjpeg-recorder.hpp
+new file mode 100644
+--- /dev/null
++++ b/plugins/win-dshow/mjpeg-recorder.hpp
+@@ -0,0 +1,25 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++struct AVFormatContext;
++struct AVStream;
++
++class NativeMjpegRecorder {
++	AVFormatContext *format_ = nullptr;
++	AVStream *stream_ = nullptr;
++	bool header_written_ = false;
++	bool have_first_ts_ = false;
++	int64_t first_ts_ = 0;
++	int64_t frame_interval_ = 0;
++	std::string filename_;
++
++public:
++	~NativeMjpegRecorder();
++
++	bool Start(const char *directory, int width, int height, int64_t frame_interval);
++	void Write(const uint8_t *data, size_t size, int64_t ts);
++	void Stop();
++
++	bool Active() const { return format_ != nullptr; }
++};
+diff --git a/plugins/win-dshow/mjpeg-recorder.cpp b/plugins/win-dshow/mjpeg-recorder.cpp
+new file mode 100644
+--- /dev/null
++++ b/plugins/win-dshow/mjpeg-recorder.cpp
+@@ -0,0 +1,145 @@
++#include "mjpeg-recorder.hpp"
++
++#include <obs-module.h>
++
++#include <libavcodec/avcodec.h>
++#include <libavformat/avformat.h>
++#include <libavutil/avutil.h>
++
++#include <windows.h>
++
++#include <climits>
++#include <cstdio>
++#include <cstring>
++#include <ctime>
++#include <string>
++
++static constexpr AVRational DSHOW_TIME_BASE = {1, 10000000};
++static constexpr AVRational OUTPUT_TIME_BASE = {1, 90000};
++
++static bool directory_exists(const char *directory)
++{
++	DWORD attrs = GetFileAttributesA(directory);
++	return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
++}
++
++static std::string make_filename(const char *directory)
++{
++	if (!directory || !*directory || !directory_exists(directory))
++		return {};
++
++	std::time_t now = std::time(nullptr);
++	std::tm tm_now{};
++	localtime_s(&tm_now, &now);
++
++	char stamp[64] = {};
++	if (std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm_now) == 0)
++		return {};
++
++	std::string prefix = std::string(directory);
++	const char last = prefix.empty() ? '\0' : prefix.back();
++	if (last != '\\' && last != '/')
++		prefix += '\\';
++
++	prefix += "El_Descorche_Facecam4K_" + std::string(stamp);
++
++	std::string filename = prefix + ".mov";
++	if (GetFileAttributesA(filename.c_str()) == INVALID_FILE_ATTRIBUTES)
++		return filename;
++
++	for (unsigned int i = 2; i < 10000; ++i) {
++		filename = prefix + "_" + std::to_string(i) + ".mov";
++		if (GetFileAttributesA(filename.c_str()) == INVALID_FILE_ATTRIBUTES)
++			return filename;
++	}
++
++	return {};
++}
++
++NativeMjpegRecorder::~NativeMjpegRecorder()
++{
++	Stop();
++}
++
++bool NativeMjpegRecorder::Start(const char *directory, int width, int height, int64_t frame_interval_value)
++{
++	Stop();
++
++	if (width <= 0 || height <= 0 || frame_interval_value <= 0)
++		return false;
++
++	filename_ = make_filename(directory);
++	if (filename_.empty()) {
++		blog(LOG_WARNING, "Native MJPEG recorder: output directory does not exist or filename unavailable");
++		return false;
++	}
++
++	int ret = avformat_alloc_output_context2(&format_, nullptr, "mov", filename_.c_str());
++	if (ret < 0 || !format_)
++		return false;
++
++	stream_ = avformat_new_stream(format_, nullptr);
++	if (!stream_) {
++		Stop();
++		return false;
++	}
++
++	stream_->time_base = OUTPUT_TIME_BASE;
++	stream_->avg_frame_rate = AVRational{10000000, (int)frame_interval_value};
++	stream_->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
++	stream_->codecpar->codec_id = AV_CODEC_ID_MJPEG;
++	stream_->codecpar->codec_tag = MKTAG('m', 'j', 'p', 'g');
++	stream_->codecpar->width = width;
++	stream_->codecpar->height = height;
++
++	if (!(format_->oformat->flags & AVFMT_NOFILE)) {
++		ret = avio_open(&format_->pb, filename_.c_str(), AVIO_FLAG_WRITE);
++		if (ret < 0) {
++			Stop();
++			return false;
++		}
++	}
++
++	ret = avformat_write_header(format_, nullptr);
++	if (ret < 0) {
++		Stop();
++		return false;
++	}
++
++	header_written_ = true;
++	have_first_ts_ = false;
++	first_ts_ = 0;
++	frame_interval_ = frame_interval_value;
++
++	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at %.3f fps -> %s",
++	     width, height, 10000000.0 / double(frame_interval_value), filename_.c_str());
++
++	return true;
++}
++
++void NativeMjpegRecorder::Write(const uint8_t *data, size_t size, int64_t ts)
++{
++	if (!format_ || !header_written_ || !stream_ || !data || size == 0 || size > INT_MAX)
++		return;
++
++	if (!have_first_ts_) {
++		first_ts_ = ts;
++		have_first_ts_ = true;
++	}
++
++	AVPacket *packet = av_packet_alloc();
++	if (!packet)
++		return;
++
++	if (av_new_packet(packet, (int)size) < 0) {
++		av_packet_free(&packet);
++		return;
++	}
++
++	memcpy(packet->data, data, size);
++	packet->stream_index = stream_->index;
++
++	const int64_t rel_ts = ts >= first_ts_ ? ts - first_ts_ : 0;
++	packet->pts = av_rescale_q(rel_ts, DSHOW_TIME_BASE, stream_->time_base);
++	packet->dts = packet->pts;
++	packet->duration = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, stream_->time_base);
++	packet->flags |= AV_PKT_FLAG_KEY;
++
++	const int ret = av_interleaved_write_frame(format_, packet);
++	if (ret < 0)
++		blog(LOG_WARNING, "Native MJPEG recorder: av_interleaved_write_frame failed: %d", ret);
++
++	av_packet_free(&packet);
++}
++
++void NativeMjpegRecorder::Stop()
++{
++	if (!format_)
++		return;
++
++	if (header_written_)
++		av_write_trailer(format_);
++
++	if (format_->pb && !(format_->oformat->flags & AVFMT_NOFILE))
++		avio_closep(&format_->pb);
++
++	avformat_free_context(format_);
++	format_ = nullptr;
++	stream_ = nullptr;
++	header_written_ = false;
++	have_first_ts_ = false;
++	first_ts_ = 0;
++	frame_interval_ = 0;
++
++	if (!filename_.empty())
++		blog(LOG_INFO, "Native MJPEG recorder: stopped -> %s", filename_.c_str());
++
++	filename_.clear();
++}
+diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
+--- a/plugins/win-dshow/win-dshow.cpp
++++ b/plugins/win-dshow/win-dshow.cpp
+@@ -10,6 +10,7 @@
+ #endif
+ #include "ffmpeg-decode.h"
+ #include "encode-dstr.hpp"
++#include "mjpeg-recorder.hpp"
+ 
+ #include <algorithm>
+ #include <limits>
+@@ -174,6 +175,7 @@
+ struct DShowInput {
+ 	obs_source_t *source;
+ 	Device device;
++	NativeMjpegRecorder mjpeg_recorder;
+ 	bool deactivateWhenNotShowing = false;
+ 	bool deviceHasAudio = false;
+ 	bool deviceHasSeparateAudioFilter = false;
+@@ -452,6 +454,8 @@
+ void DShowInput::OnEncodedVideoData(enum AVCodecID id, unsigned char *data, size_t size, long long ts)
+ {
++	if (id == AV_CODEC_ID_MJPEG && mjpeg_recorder.Active())
++		mjpeg_recorder.Write(data, size, ts);
++
+ 	/* If format or hw decode changes, recreate the decoder */
+ 	if (ffmpeg_decode_valid(video_decoder) &&
+ 	    ((video_decoder->codec->id != id) || (video_decoder->hw != hw_decode))) {
+@@ -1054,6 +1058,8 @@
+ inline bool DShowInput::Activate(obs_data_t *settings)
+ {
++	mjpeg_recorder.Stop();
++
+ 	if (!device.ResetGraph()) {
+ 		obs_source_set_audio_active(source, false);
+ 		return false;
+@@ -1076,6 +1082,11 @@
+ 	if (device.Start() != Result::Success) {
+ 		return false;
+ 	}
++
++	if (obs_data_get_bool(settings, "native_mjpeg_record") &&
++	    videoConfig.format == VideoFormat::MJPEG &&
++	    videoConfig.cx >= 3840 && videoConfig.cy_abs >= 2160) {
++		mjpeg_recorder.Start(obs_data_get_string(settings, "native_mjpeg_record_dir"),
++				     videoConfig.cx, videoConfig.cy_abs, videoConfig.frameInterval);
++	}
+ 
+ 	cs = GetColorSpace(settings);
+ 	const enum video_range_type range = GetColorRange(settings);
+@@ -1111,6 +1122,7 @@
+ inline void DShowInput::Deactivate()
+ {
++	mjpeg_recorder.Stop();
+ 	device.ResetGraph();
+ 	obs_source_output_video2(source, nullptr);
+ }
+@@ -1164,6 +1176,8 @@
+ 	obs_data_set_default_bool(settings, AUTOROTATION, true);
+ 	obs_data_set_default_bool(settings, HW_DECODE, false);
++	obs_data_set_default_bool(settings, "native_mjpeg_record", false);
++	obs_data_set_default_string(settings, "native_mjpeg_record_dir", "");
+ }
+@@ -1859,6 +1873,12 @@
+ 	obs_properties_add_bool(ppts, AUTOROTATION, TEXT_AUTOROTATION);
+ 
+ 	obs_properties_add_bool(ppts, HW_DECODE, TEXT_HW_DECODE);
++	obs_properties_add_bool(ppts, "native_mjpeg_record",
++				"Record native MJPEG to disk when this source is active (4K only)");
++	obs_properties_add_path(ppts, "native_mjpeg_record_dir",
++				"Native MJPEG output directory",
++				OBS_PATH_DIRECTORY, nullptr, nullptr);
+ 
+ 	/* ------------------------------------- */
+ 	/* audio settings */
+diff --git a/plugins/win-dshow/data/locale/en-US.ini b/plugins/win-dshow/data/locale/en-US.ini
+--- a/plugins/win-dshow/data/locale/en-US.ini
++++ b/plugins/win-dshow/data/locale/en-US.ini
+@@ -25,6 +25,8 @@
+ Autorotation="Apply rotation data from camera (if any)"
+ HardwareDecode="Use hardware decoding when available"
+ DeactivateWhenNotShowing="Deactivate when not showing"
++NativeMJPEGRecord="Record native MJPEG to disk when this source is active (4K only)"
++NativeMJPEGRecordDir="Native MJPEG output directory"
+ 
+ # encoder text
+ Bitrate="Bitrate"
