@@ -24,9 +24,9 @@ jobs:
         shell: pwsh
         run: |
           Set-Location obs-studio
-          git apply --check "$env:GITHUB_WORKSPACE\obs-33.0.0-beta4-native-mjpeg.patch"
+          git apply --recount --check "$env:GITHUB_WORKSPACE\obs-33.0.0-beta4-native-mjpeg.patch"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git apply "$env:GITHUB_WORKSPACE\obs-33.0.0-beta4-native-mjpeg.patch"
+          git apply --recount "$env:GITHUB_WORKSPACE\obs-33.0.0-beta4-native-mjpeg.patch"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
