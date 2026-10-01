@@ -153,7 +153,8 @@ new file mode 100644
 +	stream_->avg_frame_rate = AVRational{10000000, (int)frame_interval_value};
 +	stream_->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
 +	stream_->codecpar->codec_id = AV_CODEC_ID_MJPEG;
-+	stream_->codecpar->codec_tag = MKTAG('m', 'j', 'p', 'g');
++	/* Let the MOV muxer select the compatible MJPEG sample entry tag. */
++	stream_->codecpar->codec_tag = 0;
 +	stream_->codecpar->width = width;
 +	stream_->codecpar->height = height;
 +
