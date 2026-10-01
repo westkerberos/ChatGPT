@@ -28,6 +28,17 @@ jobs:
           git apply "$env:GITHUB_WORKSPACE\obs-33.0.0-beta4-native-mjpeg.patch"
           git diff --check
 
+
+      - name: Verify patch is present
+        shell: pwsh
+        working-directory: obs-studio
+        run: |
+          Write-Host "Checking patched source..."
+          if (-not (Select-String -Path "plugins/win-dshow/win-dshow.cpp" -Pattern "native_mjpeg_record" -Quiet)) { throw "Patch marker missing from win-dshow.cpp" }
+          if (-not (Select-String -Path "plugins/win-dshow/mjpeg-recorder.cpp" -Pattern "NativeMjpegRecorder" -Quiet)) { throw "mjpeg-recorder.cpp marker missing" }
+          if (-not (Select-String -Path "plugins/win-dshow/CMakeLists.txt" -Pattern "FFmpeg::avformat" -Quiet)) { throw "FFmpeg::avformat marker missing" }
+          Write-Host "Patch markers confirmed."
+
       - name: Configure OBS
         shell: pwsh
         working-directory: obs-studio
