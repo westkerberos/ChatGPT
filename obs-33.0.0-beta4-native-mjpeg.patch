@@ -42,9 +42,9 @@ new file mode 100644
 +	AVFormatContext *format_ = nullptr;
 +	AVStream *stream_ = nullptr;
 +	bool header_written_ = false;
-+	bool have_first_ts_ = false;
-+	int64_t first_ts_ = 0;
 +	int64_t frame_interval_ = 0;
++	int64_t frame_duration_ = 0;
++	uint64_t frame_index_ = 0;
 +	std::string filename_;
 +
 +public:
@@ -173,9 +173,9 @@ new file mode 100644
 +	}
 +
 +	header_written_ = true;
-+	have_first_ts_ = false;
-+	first_ts_ = 0;
 +	frame_interval_ = frame_interval_value;
++	frame_duration_ = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, stream_->time_base);
++	frame_index_ = 0;
 +
 +	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at %.3f fps -> %s",
 +	     width, height, 10000000.0 / double(frame_interval_value), filename_.c_str());
@@ -185,13 +185,10 @@ new file mode 100644
 +
 +void NativeMjpegRecorder::Write(const uint8_t *data, size_t size, int64_t ts)
 +{
++	UNUSED_PARAMETER(ts);
++
 +	if (!format_ || !header_written_ || !stream_ || !data || size == 0 || size > INT_MAX)
 +		return;
-+
-+	if (!have_first_ts_) {
-+		first_ts_ = ts;
-+		have_first_ts_ = true;
-+	}
 +
 +	AVPacket *packet = av_packet_alloc();
 +	if (!packet)
@@ -205,15 +202,16 @@ new file mode 100644
 +	memcpy(packet->data, data, size);
 +	packet->stream_index = stream_->index;
 +
-+	const int64_t rel_ts = ts >= first_ts_ ? ts - first_ts_ : 0;
-+	packet->pts = av_rescale_q(rel_ts, DSHOW_TIME_BASE, stream_->time_base);
++	packet->pts = frame_index_ * frame_duration_;
 +	packet->dts = packet->pts;
-+	packet->duration = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, stream_->time_base);
++	packet->duration = frame_duration_;
 +	packet->flags |= AV_PKT_FLAG_KEY;
 +
 +	const int ret = av_interleaved_write_frame(format_, packet);
 +	if (ret < 0)
 +		blog(LOG_WARNING, "Native MJPEG recorder: av_interleaved_write_frame failed: %d", ret);
++	else
++		++frame_index_;
 +
 +	av_packet_free(&packet);
 +}
@@ -233,9 +231,9 @@ new file mode 100644
 +	format_ = nullptr;
 +	stream_ = nullptr;
 +	header_written_ = false;
-+	have_first_ts_ = false;
-+	first_ts_ = 0;
 +	frame_interval_ = 0;
++	frame_duration_ = 0;
++	frame_index_ = 0;
 +
 +	if (!filename_.empty())
 +		blog(LOG_INFO, "Native MJPEG recorder: stopped -> %s", filename_.c_str());
