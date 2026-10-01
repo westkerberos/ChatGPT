@@ -15,13 +15,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Show toolchain
-        shell: pwsh
-        run: |
-          cmake --version
-          git --version
-          & "C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
-
       - name: Checkout OBS 33.0.0-beta4
         shell: pwsh
         run: |
