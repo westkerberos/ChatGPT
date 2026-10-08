@@ -87,6 +87,7 @@ new file mode 100644
 +#include "mjpeg-recorder.hpp"
 +
 +#include <obs-module.h>
++#include <util/platform.h>
 +
 +extern "C" {
 +#include <libavcodec/avcodec.h>
