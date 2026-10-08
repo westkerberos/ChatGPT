@@ -28,7 +28,7 @@ diff --git a/plugins/win-dshow/mjpeg-recorder.hpp b/plugins/win-dshow/mjpeg-reco
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.hpp
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,55 @@
 +#pragma once
 +
 +#include <obs.h>
@@ -49,8 +49,13 @@ new file mode 100644
 +	bool header_written_ = false;
 +	int64_t frame_interval_ = 0;
 +	int64_t frame_duration_ = 0;
++	bool have_first_video_ts_ = false;
++	int64_t first_video_ts_ = 0;
++	int64_t last_video_ts_ = 0;
++	int64_t last_video_pts_ = -1;
 +	uint64_t frame_index_ = 0;
 +	uint64_t audio_frame_index_ = 0;
++	bool audio_clock_started_ = false;
 +	uint32_t audio_sample_rate_ = 48000;
 +	bool diagnostic_have_first_ts_ = false;
 +	int64_t diagnostic_first_ts_ = 0;
@@ -83,7 +88,7 @@ diff --git a/plugins/win-dshow/mjpeg-recorder.cpp b/plugins/win-dshow/mjpeg-reco
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.cpp
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,470 @@
 +#include "mjpeg-recorder.hpp"
 +
 +#include <obs-module.h>
@@ -207,11 +212,11 @@ new file mode 100644
 +			audio_stream_->codecpar->codec_tag = 0;
 +			audio_stream_->codecpar->sample_rate = (int)audio_sample_rate_;
 +			audio_stream_->codecpar->format = AV_SAMPLE_FMT_S16;
-+			av_channel_layout_default(&audio_stream_->codecpar->ch_layout, 2);
++		av_channel_layout_default(&audio_stream_->codecpar->ch_layout, 2);
 +		}
 +	} else {
 +		blog(LOG_WARNING, "Native MJPEG recorder: audio source '%s' was not found; recording video only",
-+		     resolved_audio_name);
++			 resolved_audio_name);
 +	}
 +
 +	if (!(format_->oformat->flags & AVFMT_NOFILE)) {
@@ -241,14 +246,15 @@ new file mode 100644
 +	diagnostic_have_first_audio_ts_ = false;
 +	diagnostic_first_audio_ts_ = 0;
 +	diagnostic_last_audio_ts_ = 0;
-+	diagnostic_first_video_wall_ns_ = 0;
-+	diagnostic_have_first_audio_ts_ = false;
-+	diagnostic_first_audio_ts_ = 0;
-+	diagnostic_last_audio_ts_ = 0;
++	have_first_video_ts_ = false;
++	first_video_ts_ = 0;
++	last_video_ts_ = 0;
++	last_video_pts_ = -1;
 +	frame_interval_ = frame_interval_value;
 +	frame_duration_ = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, video_stream_->time_base);
 +	frame_index_ = 0;
 +	audio_frame_index_ = 0;
++	audio_clock_started_ = false;
 +
 +	if (audio_source && audio_stream_) {
 +		audio_source_ = audio_source;
@@ -278,6 +284,33 @@ new file mode 100644
 +	diagnostic_last_ts_ = ts;
 +	++diagnostic_frame_count_;
 +
++	if (!have_first_video_ts_) {
++		have_first_video_ts_ = true;
++		first_video_ts_ = ts;
++		last_video_ts_ = ts;
++		last_video_pts_ = -1;
++	} else if (ts <= last_video_ts_) {
++		blog(LOG_WARNING,
++		     "Native MJPEG recorder: non-monotonic DirectShow video timestamp, dropping frame ts=%lld last_ts=%lld",
++		     (long long)ts, (long long)last_video_ts_);
++		return;
++	}
++
++	const int64_t relative_ts = ts - first_video_ts_;
++	const int64_t pts = av_rescale_q(relative_ts, DSHOW_TIME_BASE, video_stream_->time_base);
++	int64_t duration = frame_duration_;
++	if (frame_index_ > 0)
++		duration = av_rescale_q(ts - last_video_ts_, DSHOW_TIME_BASE, video_stream_->time_base);
++	if (duration <= 0)
++		duration = frame_duration_;
++
++	if (last_video_pts_ >= 0 && pts <= last_video_pts_) {
++		blog(LOG_WARNING,
++		     "Native MJPEG recorder: non-monotonic rescaled video PTS, dropping frame pts=%lld last_pts=%lld",
++		     (long long)pts, (long long)last_video_pts_);
++		return;
++	}
++
 +	AVPacket *packet = av_packet_alloc();
 +	if (!packet)
 +		return;
@@ -289,16 +322,19 @@ new file mode 100644
 +
 +	memcpy(packet->data, data, size);
 +	packet->stream_index = video_stream_->index;
-+	packet->pts = frame_index_ * frame_duration_;
-+	packet->dts = packet->pts;
-+	packet->duration = frame_duration_;
++	packet->pts = pts;
++	packet->dts = pts;
++	packet->duration = duration;
 +	packet->flags |= AV_PKT_FLAG_KEY;
 +
 +	const int ret = av_interleaved_write_frame(format_, packet);
-+	if (ret < 0)
++	if (ret < 0) {
 +		blog(LOG_WARNING, "Native MJPEG recorder: video write failed: %d", ret);
-+	else
++	} else {
++		last_video_ts_ = ts;
++		last_video_pts_ = pts;
 +		++frame_index_;
++	}
 +
 +	av_packet_free(&packet);
 +}
@@ -327,27 +363,89 @@ new file mode 100644
 +	diagnostic_last_audio_ts_ = audio->timestamp;
 +
 +	/* Audio capture is already running before the 4K video recorder starts.
-+	 * Wait for the first video frame and discard audio that belongs before it,
-+	 * so both streams share the same start point instead of audio leading video.
++	 * Use the shared OBS monotonic clock only to find the first audio samples
++	 * at or after the first video frame, then switch to a sample-count clock.
 +	 */
-+	if (diagnostic_first_video_wall_ns_ == 0)
-+		return;
-+
-+	const uint64_t channels = 2;
-+	const uint32_t total_frames = audio->frames;
-+
-+	uint32_t start_frame = 0;
-+	if (audio->timestamp < diagnostic_first_video_wall_ns_) {
-+		const uint64_t delta_ns = diagnostic_first_video_wall_ns_ - audio->timestamp;
-+		const uint64_t skip_frames =
-+			(delta_ns * (uint64_t)audio_sample_rate_ + 999999999ULL) / 1000000000ULL;
-+		if (skip_frames >= total_frames)
++	if (diagnostic_first_video_wall_ns_ == 0 || audio_clock_started_ == false) {
++		if (diagnostic_first_video_wall_ns_ == 0)
 +			return;
-+		start_frame = (uint32_t)skip_frames;
++
++		const uint32_t total_frames = audio->frames;
++		uint32_t start_frame = 0;
++
++		if (audio->timestamp < diagnostic_first_video_wall_ns_) {
++			const uint64_t delta_ns = diagnostic_first_video_wall_ns_ - audio->timestamp;
++			const uint64_t skip_frames =
++				(delta_ns * (uint64_t)audio_sample_rate_ + 999999999ULL) / 1000000000ULL;
++			if (skip_frames >= total_frames)
++				return;
++			start_frame = (uint32_t)skip_frames;
++		}
++
++		const uint64_t actual_start_ns =
++			audio->timestamp + (uint64_t)start_frame * 1000000000ULL / (uint64_t)audio_sample_rate_;
++		const uint64_t relative_ns =
++			actual_start_ns > diagnostic_first_video_wall_ns_
++				? actual_start_ns - diagnostic_first_video_wall_ns_
++				: 0;
++
++		audio_frame_index_ = av_rescale_q((int64_t)relative_ns,
++								  AVRational{1, 1000000000},
++								  audio_stream_->time_base);
++		audio_clock_started_ = true;
++			/* Fall through and write the first usable packet. */
++			uint32_t frames = total_frames - start_frame;
++			const size_t sample_count = (size_t)frames * 2;
++			if (sample_count > (size_t)INT_MAX / sizeof(int16_t))
++				return;
++
++			AVPacket *packet = av_packet_alloc();
++			if (!packet)
++				return;
++
++			const int packet_size = (int)(sample_count * sizeof(int16_t));
++			if (av_new_packet(packet, packet_size) < 0) {
++				av_packet_free(&packet);
++				return;
++			}
++
++			int16_t *dst = reinterpret_cast<int16_t *>(packet->data);
++			const float *left = audio->data[0]
++				? reinterpret_cast<const float *>(audio->data[0]) + start_frame
++				: nullptr;
++			const float *right = audio->data[1]
++				? reinterpret_cast<const float *>(audio->data[1]) + start_frame
++				: left;
++
++			if (!left) {
++				memset(dst, 0, (size_t)packet_size);
++			} else {
++				for (uint32_t i = 0; i < frames; ++i) {
++					const float l = muted ? 0.0f : left[i];
++					const float r = muted ? 0.0f : (right ? right[i] : left[i]);
++					dst[(size_t)i * 2] = float_to_s16(l);
++					dst[(size_t)i * 2 + 1] = float_to_s16(r);
++				}
++			}
++
++			packet->stream_index = audio_stream_->index;
++			packet->pts = audio_frame_index_;
++			packet->dts = audio_frame_index_;
++			packet->duration = (int64_t)frames;
++			packet->flags |= AV_PKT_FLAG_KEY;
++
++			const int ret = av_interleaved_write_frame(format_, packet);
++			if (ret < 0)
++				blog(LOG_WARNING, "Native MJPEG recorder: audio write failed: %d", ret);
++			else
++				audio_frame_index_ += frames;
++
++			av_packet_free(&packet);
++			return;
 +	}
 +
-+	const uint32_t frames = total_frames - start_frame;
-+	const size_t sample_count = (size_t)frames * (size_t)channels;
++	const uint32_t frames = audio->frames;
++	const size_t sample_count = (size_t)frames * 2;
 +	if (sample_count > (size_t)INT_MAX / sizeof(int16_t))
 +		return;
 +
@@ -362,8 +460,8 @@ new file mode 100644
 +	}
 +
 +	int16_t *dst = reinterpret_cast<int16_t *>(packet->data);
-+	const float *left = audio->data[0] ? reinterpret_cast<const float *>(audio->data[0]) + start_frame : nullptr;
-+	const float *right = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) + start_frame : left;
++	const float *left = audio->data[0] ? reinterpret_cast<const float *>(audio->data[0]) : nullptr;
++	const float *right = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) : left;
 +
 +	if (!left) {
 +		memset(dst, 0, (size_t)packet_size);
@@ -376,22 +474,17 @@ new file mode 100644
 +		}
 +	}
 +
-+	const uint64_t actual_start_ns =
-+		audio->timestamp + (uint64_t)start_frame * 1000000000ULL / (uint64_t)audio_sample_rate_;
-+	const uint64_t relative_ns =
-+		actual_start_ns > diagnostic_first_video_wall_ns_
-+			? actual_start_ns - diagnostic_first_video_wall_ns_
-+			: 0;
-+
 +	packet->stream_index = audio_stream_->index;
-+	packet->pts = av_rescale_q((int64_t)relative_ns, AVRational{1, 1000000000}, audio_stream_->time_base);
-+	packet->dts = packet->pts;
++	packet->pts = audio_frame_index_;
++	packet->dts = audio_frame_index_;
 +	packet->duration = (int64_t)frames;
 +	packet->flags |= AV_PKT_FLAG_KEY;
 +
 +	const int ret = av_interleaved_write_frame(format_, packet);
 +	if (ret < 0)
 +		blog(LOG_WARNING, "Native MJPEG recorder: audio write failed: %d", ret);
++	else
++		audio_frame_index_ += frames;
 +
 +	av_packet_free(&packet);
 +}
@@ -445,12 +538,21 @@ new file mode 100644
 +	header_written_ = false;
 +	frame_interval_ = 0;
 +	frame_duration_ = 0;
++	have_first_video_ts_ = false;
++	first_video_ts_ = 0;
++	last_video_ts_ = 0;
++	last_video_pts_ = -1;
 +	frame_index_ = 0;
 +	audio_frame_index_ = 0;
++	audio_clock_started_ = false;
 +	diagnostic_have_first_ts_ = false;
 +	diagnostic_first_ts_ = 0;
 +	diagnostic_last_ts_ = 0;
 +	diagnostic_frame_count_ = 0;
++	diagnostic_first_video_wall_ns_ = 0;
++	diagnostic_have_first_audio_ts_ = false;
++	diagnostic_first_audio_ts_ = 0;
++	diagnostic_last_audio_ts_ = 0;
 +
 +	if (!filename_.empty())
 +		blog(LOG_INFO, "Native MJPEG recorder: stopped -> %s", filename_.c_str());
