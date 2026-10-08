@@ -52,6 +52,10 @@ new file mode 100644
 +	uint64_t frame_index_ = 0;
 +	uint64_t audio_frame_index_ = 0;
 +	uint32_t audio_sample_rate_ = 48000;
++	bool diagnostic_have_first_ts_ = false;
++	int64_t diagnostic_first_ts_ = 0;
++	int64_t diagnostic_last_ts_ = 0;
++	uint64_t diagnostic_frame_count_ = 0;
 +	std::string filename_;
 +	mutable std::mutex mutex_;
 +
@@ -224,6 +228,10 @@ new file mode 100644
 +	}
 +
 +	header_written_ = true;
++	diagnostic_have_first_ts_ = false;
++	diagnostic_first_ts_ = 0;
++	diagnostic_last_ts_ = 0;
++	diagnostic_frame_count_ = 0;
 +	frame_interval_ = frame_interval_value;
 +	frame_duration_ = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, video_stream_->time_base);
 +	frame_index_ = 0;
@@ -244,12 +252,17 @@ new file mode 100644
 +
 +void NativeMjpegRecorder::Write(const uint8_t *data, size_t size, int64_t ts)
 +{
-+	UNUSED_PARAMETER(ts);
-+
 +	std::lock_guard<std::mutex> lock(mutex_);
 +
 +	if (!format_ || !header_written_ || !video_stream_ || !data || size == 0 || size > INT_MAX)
 +		return;
++
++	if (!diagnostic_have_first_ts_) {
++		diagnostic_first_ts_ = ts;
++		diagnostic_have_first_ts_ = true;
++	}
++	diagnostic_last_ts_ = ts;
++	++diagnostic_frame_count_;
 +
 +	AVPacket *packet = av_packet_alloc();
 +	if (!packet)
@@ -357,6 +370,18 @@ new file mode 100644
 +	if (!format_)
 +		return;
 +
++	if (diagnostic_have_first_ts_ && diagnostic_last_ts_ >= diagnostic_first_ts_) {
++		const double elapsed = double(diagnostic_last_ts_ - diagnostic_first_ts_) / 10000000.0;
++		const double effective_fps = diagnostic_frame_count_ > 1 && elapsed > 0.0
++			? double(diagnostic_frame_count_ - 1) / elapsed
++			: 0.0;
++		blog(LOG_INFO,
++		     "Native MJPEG recorder: DIAG frames=%llu first_ts=%lld last_ts=%lld elapsed=%.6f effective_fps=%.3f",
++		     (unsigned long long)diagnostic_frame_count_,
++		     (long long)diagnostic_first_ts_,
++		     (long long)diagnostic_last_ts_, elapsed, effective_fps);
++	}
++
 +	if (header_written_)
 +		av_write_trailer(format_);
 +
@@ -372,6 +397,10 @@ new file mode 100644
 +	frame_duration_ = 0;
 +	frame_index_ = 0;
 +	audio_frame_index_ = 0;
++	diagnostic_have_first_ts_ = false;
++	diagnostic_first_ts_ = 0;
++	diagnostic_last_ts_ = 0;
++	diagnostic_frame_count_ = 0;
 +
 +	if (!filename_.empty())
 +		blog(LOG_INFO, "Native MJPEG recorder: stopped -> %s", filename_.c_str());
