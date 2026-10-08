@@ -88,7 +88,7 @@ diff --git a/plugins/win-dshow/mjpeg-recorder.cpp b/plugins/win-dshow/mjpeg-reco
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.cpp
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,420 @@
 +#include "mjpeg-recorder.hpp"
 +
 +#include <obs-module.h>
@@ -105,10 +105,8 @@ new file mode 100644
 +#include <algorithm>
 +#include <climits>
 +#include <cmath>
-+#include <cstdio>
 +#include <cstring>
 +#include <ctime>
-+#include <limits>
 +#include <string>
 +
 +static constexpr AVRational DSHOW_TIME_BASE = {1, 10000000};
@@ -212,11 +210,11 @@ new file mode 100644
 +			audio_stream_->codecpar->codec_tag = 0;
 +			audio_stream_->codecpar->sample_rate = (int)audio_sample_rate_;
 +			audio_stream_->codecpar->format = AV_SAMPLE_FMT_S16;
-+		av_channel_layout_default(&audio_stream_->codecpar->ch_layout, 2);
++			av_channel_layout_default(&audio_stream_->codecpar->ch_layout, 2);
 +		}
 +	} else {
 +		blog(LOG_WARNING, "Native MJPEG recorder: audio source '%s' was not found; recording video only",
-+			 resolved_audio_name);
++		     resolved_audio_name);
 +	}
 +
 +	if (!(format_->oformat->flags & AVFMT_NOFILE)) {
@@ -263,8 +261,8 @@ new file mode 100644
 +		obs_source_release(audio_source);
 +	}
 +
-+	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at %.3f fps -> %s",
-+	     width, height, 10000000.0 / double(frame_interval_value), filename_.c_str());
++	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at 60.000 fps -> %s",
++	     width, height, filename_.c_str());
 +
 +	return true;
 +}
@@ -362,17 +360,13 @@ new file mode 100644
 +	}
 +	diagnostic_last_audio_ts_ = audio->timestamp;
 +
-+	/* Audio capture is already running before the 4K video recorder starts.
-+	 * Use the shared OBS monotonic clock only to find the first audio samples
-+	 * at or after the first video frame, then switch to a sample-count clock.
-+	 */
-+	if (diagnostic_first_video_wall_ns_ == 0 || audio_clock_started_ == false) {
-+		if (diagnostic_first_video_wall_ns_ == 0)
-+			return;
++	if (diagnostic_first_video_wall_ns_ == 0)
++		return;
 +
-+		const uint32_t total_frames = audio->frames;
-+		uint32_t start_frame = 0;
++	const uint32_t total_frames = audio->frames;
++	uint32_t start_frame = 0;
 +
++	if (!audio_clock_started_) {
 +		if (audio->timestamp < diagnostic_first_video_wall_ns_) {
 +			const uint64_t delta_ns = diagnostic_first_video_wall_ns_ - audio->timestamp;
 +			const uint64_t skip_frames =
@@ -392,59 +386,9 @@ new file mode 100644
 +		audio_frame_index_ = av_rescale_q((int64_t)relative_ns,
 +								  AVRational{1, 1000000000},
 +								  audio_stream_->time_base);
-+		audio_clock_started_ = true;
-+			/* Fall through and write the first usable packet. */
-+			uint32_t frames = total_frames - start_frame;
-+			const size_t sample_count = (size_t)frames * 2;
-+			if (sample_count > (size_t)INT_MAX / sizeof(int16_t))
-+				return;
-+
-+			AVPacket *packet = av_packet_alloc();
-+			if (!packet)
-+				return;
-+
-+			const int packet_size = (int)(sample_count * sizeof(int16_t));
-+			if (av_new_packet(packet, packet_size) < 0) {
-+				av_packet_free(&packet);
-+				return;
-+			}
-+
-+			int16_t *dst = reinterpret_cast<int16_t *>(packet->data);
-+			const float *left = audio->data[0]
-+				? reinterpret_cast<const float *>(audio->data[0]) + start_frame
-+				: nullptr;
-+			const float *right = audio->data[1]
-+				? reinterpret_cast<const float *>(audio->data[1]) + start_frame
-+				: left;
-+
-+			if (!left) {
-+				memset(dst, 0, (size_t)packet_size);
-+			} else {
-+				for (uint32_t i = 0; i < frames; ++i) {
-+					const float l = muted ? 0.0f : left[i];
-+					const float r = muted ? 0.0f : (right ? right[i] : left[i]);
-+					dst[(size_t)i * 2] = float_to_s16(l);
-+					dst[(size_t)i * 2 + 1] = float_to_s16(r);
-+				}
-+			}
-+
-+			packet->stream_index = audio_stream_->index;
-+			packet->pts = audio_frame_index_;
-+			packet->dts = audio_frame_index_;
-+			packet->duration = (int64_t)frames;
-+			packet->flags |= AV_PKT_FLAG_KEY;
-+
-+			const int ret = av_interleaved_write_frame(format_, packet);
-+			if (ret < 0)
-+				blog(LOG_WARNING, "Native MJPEG recorder: audio write failed: %d", ret);
-+			else
-+				audio_frame_index_ += frames;
-+
-+			av_packet_free(&packet);
-+			return;
 +	}
 +
-+	const uint32_t frames = audio->frames;
++	const uint32_t frames = total_frames - start_frame;
 +	const size_t sample_count = (size_t)frames * 2;
 +	if (sample_count > (size_t)INT_MAX / sizeof(int16_t))
 +		return;
@@ -460,8 +404,12 @@ new file mode 100644
 +	}
 +
 +	int16_t *dst = reinterpret_cast<int16_t *>(packet->data);
-+	const float *left = audio->data[0] ? reinterpret_cast<const float *>(audio->data[0]) : nullptr;
-+	const float *right = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) : left;
++	const float *left = audio->data[0]
++		? reinterpret_cast<const float *>(audio->data[0]) + start_frame
++		: nullptr;
++	const float *right = audio->data[1]
++		? reinterpret_cast<const float *>(audio->data[1]) + start_frame
++		: left;
 +
 +	if (!left) {
 +		memset(dst, 0, (size_t)packet_size);
@@ -481,10 +429,12 @@ new file mode 100644
 +	packet->flags |= AV_PKT_FLAG_KEY;
 +
 +	const int ret = av_interleaved_write_frame(format_, packet);
-+	if (ret < 0)
++	if (ret < 0) {
 +		blog(LOG_WARNING, "Native MJPEG recorder: audio write failed: %d", ret);
-+	else
++	} else {
++		audio_clock_started_ = true;
 +		audio_frame_index_ += frames;
++	}
 +
 +	av_packet_free(&packet);
 +}
