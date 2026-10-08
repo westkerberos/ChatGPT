@@ -326,11 +326,27 @@ new file mode 100644
 +	}
 +	diagnostic_last_audio_ts_ = audio->timestamp;
 +
-+	const uint64_t channels = 2;
-+	const uint64_t frames = audio->frames;
-+	if (frames > std::numeric_limits<uint32_t>::max())
++	/* Audio capture is already running before the 4K video recorder starts.
++	 * Wait for the first video frame and discard audio that belongs before it,
++	 * so both streams share the same start point instead of audio leading video.
++	 */
++	if (diagnostic_first_video_wall_ns_ == 0)
 +		return;
 +
++	const uint64_t channels = 2;
++	const uint32_t total_frames = audio->frames;
++
++	uint32_t start_frame = 0;
++	if (audio->timestamp < diagnostic_first_video_wall_ns_) {
++		const uint64_t delta_ns = diagnostic_first_video_wall_ns_ - audio->timestamp;
++		const uint64_t skip_frames =
++			(delta_ns * (uint64_t)audio_sample_rate_ + 999999999ULL) / 1000000000ULL;
++		if (skip_frames >= total_frames)
++			return;
++		start_frame = (uint32_t)skip_frames;
++	}
++
++	const uint32_t frames = total_frames - start_frame;
 +	const size_t sample_count = (size_t)frames * (size_t)channels;
 +	if (sample_count > (size_t)INT_MAX / sizeof(int16_t))
 +		return;
@@ -346,13 +362,13 @@ new file mode 100644
 +	}
 +
 +	int16_t *dst = reinterpret_cast<int16_t *>(packet->data);
-+	const float *left = audio->data[0] ? reinterpret_cast<const float *>(audio->data[0]) : nullptr;
-+	const float *right = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) : left;
++	const float *left = audio->data[0] ? reinterpret_cast<const float *>(audio->data[0]) + start_frame : nullptr;
++	const float *right = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) + start_frame : left;
 +
 +	if (!left) {
 +		memset(dst, 0, (size_t)packet_size);
 +	} else {
-+		for (uint32_t i = 0; i < audio->frames; ++i) {
++		for (uint32_t i = 0; i < frames; ++i) {
 +			const float l = muted ? 0.0f : left[i];
 +			const float r = muted ? 0.0f : (right ? right[i] : left[i]);
 +			dst[(size_t)i * 2] = float_to_s16(l);
@@ -360,8 +376,15 @@ new file mode 100644
 +		}
 +	}
 +
++	const uint64_t actual_start_ns =
++		audio->timestamp + (uint64_t)start_frame * 1000000000ULL / (uint64_t)audio_sample_rate_;
++	const uint64_t relative_ns =
++		actual_start_ns > diagnostic_first_video_wall_ns_
++			? actual_start_ns - diagnostic_first_video_wall_ns_
++			: 0;
++
 +	packet->stream_index = audio_stream_->index;
-+	packet->pts = (int64_t)audio_frame_index_;
++	packet->pts = av_rescale_q((int64_t)relative_ns, AVRational{1, 1000000000}, audio_stream_->time_base);
 +	packet->dts = packet->pts;
 +	packet->duration = (int64_t)frames;
 +	packet->flags |= AV_PKT_FLAG_KEY;
@@ -369,8 +392,6 @@ new file mode 100644
 +	const int ret = av_interleaved_write_frame(format_, packet);
 +	if (ret < 0)
 +		blog(LOG_WARNING, "Native MJPEG recorder: audio write failed: %d", ret);
-+	else
-+		audio_frame_index_ += frames;
 +
 +	av_packet_free(&packet);
 +}
