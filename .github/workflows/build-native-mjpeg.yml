@@ -15,10 +15,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Checkout OBS 33.0.0-beta5
+      - name: Checkout OBS 33.0.0-beta6
         shell: pwsh
         run: |
-          git clone --recursive --depth 1 --branch 33.0.0-beta5 https://github.com/obsproject/obs-studio.git obs-studio
+          git clone --recursive --depth 1 --branch 33.0.0-beta6 https://github.com/obsproject/obs-studio.git obs-studio
 
       - name: Apply native MJPEG patch
         shell: pwsh
@@ -82,7 +82,7 @@ jobs:
       - name: Upload DLL artifact
         uses: actions/upload-artifact@v4
         with:
-          name: obs-33.0.0-beta5-native-mjpeg-win-dshow
+          name: obs-33.0.0-beta6-native-mjpeg-win-dshow
           path: artifact/
           if-no-files-found: error
           retention-days: 14
