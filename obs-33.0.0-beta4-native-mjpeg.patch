@@ -56,6 +56,10 @@ new file mode 100644
 +	int64_t diagnostic_first_ts_ = 0;
 +	int64_t diagnostic_last_ts_ = 0;
 +	uint64_t diagnostic_frame_count_ = 0;
++	uint64_t diagnostic_first_video_wall_ns_ = 0;
++	bool diagnostic_have_first_audio_ts_ = false;
++	uint64_t diagnostic_first_audio_ts_ = 0;
++	uint64_t diagnostic_last_audio_ts_ = 0;
 +	std::string filename_;
 +	mutable std::mutex mutex_;
 +
@@ -232,6 +236,14 @@ new file mode 100644
 +	diagnostic_first_ts_ = 0;
 +	diagnostic_last_ts_ = 0;
 +	diagnostic_frame_count_ = 0;
++	diagnostic_first_video_wall_ns_ = 0;
++	diagnostic_have_first_audio_ts_ = false;
++	diagnostic_first_audio_ts_ = 0;
++	diagnostic_last_audio_ts_ = 0;
++	diagnostic_first_video_wall_ns_ = 0;
++	diagnostic_have_first_audio_ts_ = false;
++	diagnostic_first_audio_ts_ = 0;
++	diagnostic_last_audio_ts_ = 0;
 +	frame_interval_ = frame_interval_value;
 +	frame_duration_ = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, video_stream_->time_base);
 +	frame_index_ = 0;
@@ -260,6 +272,7 @@ new file mode 100644
 +	if (!diagnostic_have_first_ts_) {
 +		diagnostic_first_ts_ = ts;
 +		diagnostic_have_first_ts_ = true;
++		diagnostic_first_video_wall_ns_ = os_gettime_ns();
 +	}
 +	diagnostic_last_ts_ = ts;
 +	++diagnostic_frame_count_;
@@ -305,6 +318,12 @@ new file mode 100644
 +
 +	if (!format_ || !header_written_ || !audio_stream_ || !audio || audio->frames == 0)
 +		return;
++
++	if (!diagnostic_have_first_audio_ts_) {
++		diagnostic_first_audio_ts_ = audio->timestamp;
++		diagnostic_have_first_audio_ts_ = true;
++	}
++	diagnostic_last_audio_ts_ = audio->timestamp;
 +
 +	const uint64_t channels = 2;
 +	const uint64_t frames = audio->frames;
@@ -380,6 +399,15 @@ new file mode 100644
 +		     (unsigned long long)diagnostic_frame_count_,
 +		     (long long)diagnostic_first_ts_,
 +		     (long long)diagnostic_last_ts_, elapsed, effective_fps);
++	}
++
++	if (diagnostic_have_first_audio_ts_ && diagnostic_first_video_wall_ns_ > 0) {
++		const double first_audio_delta_ms =
++			(double)((int64_t)diagnostic_first_audio_ts_ - (int64_t)diagnostic_first_video_wall_ns_) / 1000000.0;
++		blog(LOG_INFO,
++		     "Native MJPEG recorder: DIAG audio_first=%llu audio_last=%llu first_audio_minus_first_video_wall=%.3f ms",
++		     (unsigned long long)diagnostic_first_audio_ts_,
++		     (unsigned long long)diagnostic_last_audio_ts_, first_audio_delta_ms);
 +	}
 +
 +	if (header_written_)
