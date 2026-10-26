@@ -110,6 +110,68 @@ jobs:
           & "$env:VCPKG_ROOT\vcpkg.exe" install --x-manifest-root="$PWD" --x-install-root="$PWD\vcpkg_installed" --triplet=x64-windows-v3-static-md-release --overlay-triplets="$PWD\triplets" --overlay-ports="$PWD\vcpkg-overlays"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg dependency installation failed." }
 
+      - name: Prepare verified MPV SDK (upstream pinned archive returns 404)
+        shell: pwsh
+        working-directory: source
+        run: |
+          $url = 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261021/mpv-dev-x86_64-v3-20261021-git-e471496c56.7z'
+          $expectedArchiveHash = 'e49e086c77085f850e20869feab7ab3ee6e514f8492f5495fb2adbabf42dc5d2'
+          $archive = Join-Path $env:RUNNER_TEMP 'mpv-dev-x86_64-v3-20261021.7z'
+          $extract = Join-Path $env:RUNNER_TEMP 'mpv-dev-extract'
+          $sdk = Join-Path $PWD 'mpv-sdk'
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($archiveHash -ne $expectedArchiveHash) {
+            throw "MPV SDK archive SHA-256 mismatch. Expected $expectedArchiveHash, got $archiveHash"
+          }
+
+          $sevenZip = @(
+            (Join-Path $env:ProgramFiles '7-Zip\7z.exe'),
+            (Join-Path $env:ProgramFiles '(x86)\7-Zip\7z.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $sevenZip) {
+            choco install 7zip --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw "Could not install 7-Zip to extract MPV SDK." }
+            $sevenZip = @(
+              (Join-Path $env:ProgramFiles '7-Zip\7z.exe'),
+              (Join-Path $env:ProgramFiles '(x86)\7-Zip\7z.exe')
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $sevenZip) { throw "7z.exe was not found." }
+          Remove-Item -Recurse -Force $extract, $sdk -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $extract, $sdk | Out-Null
+          & $sevenZip x $archive "-o$extract" -y
+          if ($LASTEXITCODE -ne 0) { throw "Could not extract the verified MPV SDK archive." }
+
+          $dllMatches = @(Get-ChildItem -Path $extract -Recurse -File -Filter 'libmpv-2.dll')
+          $libMatches = @(Get-ChildItem -Path $extract -Recurse -File -Filter 'libmpv.dll.a')
+          if ($dllMatches.Count -ne 1) { throw "Expected one libmpv-2.dll in the SDK; found $($dllMatches.Count)." }
+          if ($libMatches.Count -ne 1) { throw "Expected one libmpv.dll.a in the SDK; found $($libMatches.Count)." }
+
+          $dllDir = Join-Path $sdk 'bin'
+          $libDir = Join-Path $sdk 'lib'
+          New-Item -ItemType Directory -Force -Path $dllDir, $libDir | Out-Null
+          Copy-Item $dllMatches[0].FullName (Join-Path $dllDir 'libmpv-2.dll')
+          Copy-Item $libMatches[0].FullName (Join-Path $libDir 'mpv.lib')
+          $runtimeHash = (Get-FileHash (Join-Path $dllDir 'libmpv-2.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $importHash = (Get-FileHash (Join-Path $libDir 'mpv.lib') -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $lockPath = Join-Path $PWD 'mpv.lock.json'
+          $lock = Get-Content -Raw $lockPath | ConvertFrom-Json
+          $lock.distribution.release = '20261021'
+          $lock.distribution.asset = 'mpv-dev-x86_64-v3-20261021-git-e471496c56.7z'
+          $lock.distribution.url = $url
+          $lock.distribution.sha256 = $expectedArchiveHash
+          $artifact = $lock.artifacts.'windows-x86_64-v3-dynamic'
+          $artifact.runtimeLibrary.sha256 = $runtimeHash
+          $artifact.importLibrary.sha256 = $importHash
+          $lock | ConvertTo-Json -Depth 100 | Set-Content -Path $lockPath -Encoding utf8
+
+          "STREMIO_MPV_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "MPV SDK archive verified: $archiveHash"
+          Write-Output "Prepared libmpv runtime SHA-256: $runtimeHash"
+          Write-Output "Prepared import library SHA-256: $importHash"
+
       - name: Build corrected executable and stage runtime
         shell: pwsh
         working-directory: source
@@ -118,6 +180,7 @@ jobs:
           VCPKG_INSTALLED_DIR: ${{ github.workspace }}\source\vcpkg_installed
           VCPKG_DEFAULT_TRIPLET: x64-windows-v3-static-md-release
           VCPKGRS_TRIPLET: x64-windows-v3-static-md-release
+          STREMIO_MPV_DIR: ${{ github.workspace }}\\source\\mpv-sdk
           PKG_CONFIG_PATH: ${{ github.workspace }}\source\vcpkg_installed\x64-windows-v3-static-md-release\lib\pkgconfig
         run: |
           cargo build --locked --release --package stremio-native
