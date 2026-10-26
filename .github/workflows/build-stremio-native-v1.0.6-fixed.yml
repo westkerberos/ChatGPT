@@ -103,7 +103,7 @@ jobs:
         shell: pwsh
         working-directory: source
         env:
-          VCPKG_ROOT: ${{ github.workspace }}
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_INSTALLED_DIR: ${{ github.workspace }}\source\vcpkg_installed
           VCPKG_DEFAULT_TRIPLET: x64-windows-v3-static-md-release
         run: |
