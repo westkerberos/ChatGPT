@@ -1,0 +1,173 @@
+name: Build Stremio Native v1.0.6 (settings.json fix)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-stremio-native-v1.0.6-fixed.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout Stremio Native v1.0.6 source
+        uses: actions/checkout@v4
+        with:
+          repository: stremio-native/stremio-native
+          ref: v1.0.6
+          path: source
+          submodules: recursive
+
+      - name: Set up Rust MSVC toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Locate or install LLVM libclang
+        shell: pwsh
+        run: |
+          $roots = @(
+            'C:\Program Files\LLVM\bin',
+            'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin',
+            'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin',
+            'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin'
+          )
+          function Find-LibClang {
+            foreach ($root in $roots) {
+              if (Test-Path (Join-Path $root 'libclang.dll')) { return $root }
+            }
+            return $null
+          }
+          $llvmBin = Find-LibClang
+          if (-not $llvmBin) {
+            choco install llvm --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey could not install LLVM." }
+            $llvmBin = Find-LibClang
+          }
+          if (-not $llvmBin) { throw "libclang.dll was not found." }
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Apply settings snapshot fix
+        shell: pwsh
+        working-directory: source
+        run: |
+          $path = "server-connector\src\lib.rs"
+          $full = (Resolve-Path $path).Path
+          $content = [System.IO.File]::ReadAllText($full)
+          $pattern = '#\[serde\(flatten\)\](?=\r?\n\s*pub settings: SettingsPayload,)'
+          $count = [regex]::Matches($content, $pattern).Count
+          if ($count -ne 1) {
+            throw "Expected exactly one SettingsSnapshot flatten attribute; found $count. Refusing to patch."
+          }
+          $patched = [regex]::Replace($content, $pattern, '#[serde(rename = "values")]')
+          [System.IO.File]::WriteAllText($full, $patched, [System.Text.UTF8Encoding]::new($false))
+          $verify = [System.IO.File]::ReadAllText($full)
+          if (-not $verify.Contains('#[serde(rename = "values")]')) { throw "Patch verification failed." }
+          Write-Output "SettingsSnapshot now reads the nested JSON property 'values'."
+
+      - name: Prepare pinned vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
+          $commit = '84bab45d415d22042bd0b9081aea57f362da3f35'
+          function Invoke-WithRetry {
+            param([string] $What, [scriptblock] $Action)
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              & $Action
+              if ($LASTEXITCODE -eq 0) { return }
+              Write-Output "$What failed (attempt $attempt of 5)"
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+            throw "$What failed after 5 attempts."
+          }
+          if (-not (Test-Path (Join-Path $dir '.git'))) {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            Invoke-WithRetry 'vcpkg clone' {
+              git clone https://github.com/microsoft/vcpkg.git -n $dir
+            }
+          }
+          Invoke-WithRetry 'vcpkg checkout' { git -C $dir checkout --force $commit }
+          if (-not (Test-Path (Join-Path $dir 'vcpkg.exe'))) {
+            Invoke-WithRetry 'vcpkg bootstrap' {
+              & (Join-Path $dir 'bootstrap-vcpkg.bat') -disableMetrics
+            }
+          }
+
+      - name: Install native dependencies
+        shell: pwsh
+        working-directory: source
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}
+          VCPKG_INSTALLED_DIR: ${{ github.workspace }}\source\vcpkg_installed
+          VCPKG_DEFAULT_TRIPLET: x64-windows-v3-static-md-release
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --x-manifest-root="$PWD" --x-install-root="$PWD\vcpkg_installed" --triplet=x64-windows-v3-static-md-release --overlay-triplets="$PWD\triplets" --overlay-ports="$PWD\vcpkg-overlays"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg dependency installation failed." }
+
+      - name: Build corrected executable and stage runtime
+        shell: pwsh
+        working-directory: source
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+          VCPKG_INSTALLED_DIR: ${{ github.workspace }}\source\vcpkg_installed
+          VCPKG_DEFAULT_TRIPLET: x64-windows-v3-static-md-release
+          VCPKGRS_TRIPLET: x64-windows-v3-static-md-release
+          PKG_CONFIG_PATH: ${{ github.workspace }}\source\vcpkg_installed\x64-windows-v3-static-md-release\lib\pkgconfig
+        run: |
+          cargo build --locked --release --package stremio-native
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed." }
+          & .\scripts\stage_windows_msvc_runtime.ps1 -BuildRoot .\target\release
+          if ($LASTEXITCODE -ne 0) { throw "Staging the MSVC runtime failed." }
+
+      - name: Package unpacked application contents (no installer)
+        shell: pwsh
+        working-directory: source
+        run: |
+          $root = Join-Path $PWD "target\release"
+          $required = @(
+            "stremio-native.exe",
+            "libmpv-2.dll",
+            "msvc-runtime",
+            "licenses\mpv\LICENSE.GPL",
+            "licenses\mpv\LICENSE.LGPL"
+          )
+          foreach ($item in $required) {
+            if (-not (Test-Path (Join-Path $root $item))) {
+              throw "Missing expected runtime file: $item"
+            }
+          }
+          $bundle = Join-Path $PWD "bundle"
+          $artifacts = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Force -Path $bundle, $artifacts | Out-Null
+          Copy-Item (Join-Path $root "stremio-native.exe") $bundle
+          Copy-Item (Join-Path $root "libmpv-2.dll") $bundle
+          Copy-Item (Join-Path $root "msvc-runtime") (Join-Path $bundle "msvc-runtime") -Recurse
+          New-Item -ItemType Directory -Force -Path (Join-Path $bundle "licenses") | Out-Null
+          Copy-Item (Join-Path $root "licenses\mpv") (Join-Path $bundle "licenses\mpv") -Recurse
+          if (Test-Path (Join-Path $PWD "LICENSE")) { Copy-Item (Join-Path $PWD "LICENSE") $bundle }
+          @(
+            "Stremio Native v1.0.6 - settings.json compatibility fix",
+            "Source: stremio-native/stremio-native tag v1.0.6",
+            "Fix: SettingsSnapshot.settings deserializes from the JSON property 'values'.",
+            "Unpacked application contents; no installer included."
+          ) | Set-Content -Path (Join-Path $bundle "BUILD-INFO.txt") -Encoding utf8
+          $zip = Join-Path $artifacts "stremio-native-v1.0.6-fixed-content.zip"
+          Compress-Archive -Path (Join-Path $bundle "*") -DestinationPath $zip -CompressionLevel Optimal -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          "SHA256  $hash  stremio-native-v1.0.6-fixed-content.zip" | Set-Content -Path (Join-Path $artifacts "SHA256SUMS.txt") -Encoding ascii
+
+      - name: Upload compiled content
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-native-v1.0.6-fixed-content
+          path: |
+            source/artifacts/stremio-native-v1.0.6-fixed-content.zip
+            source/artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
