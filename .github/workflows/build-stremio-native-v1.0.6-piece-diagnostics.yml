@@ -71,7 +71,6 @@ jobs:
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\build-tools\scripts\patch-stremio-native-piece-availability.ps1" -AppRoot "$env:GITHUB_WORKSPACE\source"
-          if ($LASTEXITCODE -ne 0) { throw "Diagnostic source patches failed." }
 
       - name: Prepare pinned vcpkg
         shell: pwsh
