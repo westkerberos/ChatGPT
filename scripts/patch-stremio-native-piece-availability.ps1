@@ -24,7 +24,7 @@ function Replace-ExactlyOnce {
     }
 
     if ($count -ne 1) {
-        throw "$Description: expected exactly one match, found $count. Refusing to patch an unexpected source tree."
+        throw "${Description}: expected exactly one match, found $count. Refusing to patch an unexpected source tree."
     }
 
     $updated = $content.Replace($Needle, $Replacement)

@@ -31,6 +31,13 @@ jobs:
           ref: f585ab6eda9b1411034548c131bb0dc30c6f5f9e
           path: source/stream-server
 
+      - name: Checkout reproducible build scripts
+        uses: actions/checkout@v4
+        with:
+          repository: westkerberos/ChatGPT
+          ref: stremio-native-1.0.6-piece-diagnostics
+          path: build-tools
+
       - name: Set up Rust MSVC toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -63,7 +70,7 @@ jobs:
       - name: Apply settings and passive piece-diagnostics patches
         shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\scripts\patch-stremio-native-piece-availability.ps1" -AppRoot "$env:GITHUB_WORKSPACE\source"
+          & "$env:GITHUB_WORKSPACE\build-tools\scripts\patch-stremio-native-piece-availability.ps1" -AppRoot "$env:GITHUB_WORKSPACE\source"
           if ($LASTEXITCODE -ne 0) { throw "Diagnostic source patches failed." }
 
       - name: Prepare pinned vcpkg
