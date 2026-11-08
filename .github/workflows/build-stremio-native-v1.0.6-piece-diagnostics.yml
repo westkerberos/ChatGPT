@@ -224,9 +224,9 @@ jobs:
           Copy-Item (Join-Path $root "licenses\mpv") (Join-Path $bundle "licenses\mpv") -Recurse
           if (Test-Path (Join-Path $PWD "LICENSE")) { Copy-Item (Join-Path $PWD "LICENSE") $bundle }
           Copy-Item (Join-Path $PWD "Cargo.lock") (Join-Path $bundle "Cargo.lock")
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "scripts\patch-stremio-native-piece-availability.ps1") (Join-Path $bundle "PATCH-STREMIO-NATIVE-PIECE-AVAILABILITY.ps1")
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "build-tools\scripts\patch-stremio-native-piece-availability.ps1") (Join-Path $bundle "PATCH-STREMIO-NATIVE-PIECE-AVAILABILITY.ps1")
           $lockHash = (Get-FileHash (Join-Path $PWD "Cargo.lock") -Algorithm SHA256).Hash.ToLowerInvariant()
-          $patchHash = (Get-FileHash (Join-Path $env:GITHUB_WORKSPACE "scripts\patch-stremio-native-piece-availability.ps1") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $patchHash = (Get-FileHash (Join-Path $env:GITHUB_WORKSPACE "build-tools\scripts\patch-stremio-native-piece-availability.ps1") -Algorithm SHA256).Hash.ToLowerInvariant()
           @(
             "Stremio Native v1.0.6 - passive piece availability diagnostics",
             "Source: stremio-native/stremio-native tag v1.0.6",
