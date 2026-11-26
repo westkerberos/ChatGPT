@@ -18,33 +18,27 @@ Configuration fields:
 
 If the audio source is found, the patch adds PCM S16LE stereo audio. If not found, it warns and records video only. The recorder includes timestamp checks, dropped-frame warnings and diagnostic logs.
 
-## Build evidence
-
-### OBS 33.0.1 — successful
-
-- Branch: [`obs-33.0.1-build`](https://github.com/westkerberos/ChatGPT/tree/obs-33.0.1-build).
-- Workflow: [#43638792702](https://github.com/westkerberos/ChatGPT/actions/runs/43638792702).
-- Result: patch applied, markers verified, CMake configured, `win-dshow` built, DLL/PDB/SHA-256 uploaded.
-- Artifact is a temporary GitHub Actions artifact, not a supported release and not a binary for OBS 33.0.3.
-
-### OBS 33.0.3 — patch applied, build blocked by runner dependency
+## OBS 33.0.3 build evidence
 
 - Branch: [`obs-33.0.3-native-mjpeg`](https://github.com/westkerberos/ChatGPT/tree/obs-33.0.3-native-mjpeg).
-- Commit: `561d3e30f14b5444cb04edaf5d6c77f29c743903`.
-- Workflow: [#45856617485](https://github.com/westkerberos/ChatGPT/actions/runs/45856617485).
-- Patch dry-run/application, source-marker validation and CMake configure completed successfully.
-- Build then failed while compiling OBS's DirectShow/virtual-camera dependency because the GitHub Windows runner did not have Visual C++ ATL headers `atlcomcli.h` and `atlstr.h`.
-- This does **not** establish a source incompatibility with OBS 33.0.3. It also does not establish a successful DLL build. No OBS 33.0.3 DShow DLL has been produced yet.
+- Build-tested commit: `f4ef30142ca4fe70fea712b39322fb2fb6c9fdcf`.
+- Workflow: [#45898711824](https://github.com/westkerberos/ChatGPT/actions/runs/45898711824).
+- Result: patch application, source-marker validation, CMake configuration, `win-dshow` compilation, DLL/PDB collection and artifact upload all succeeded against OBS tag **33.0.3**.
+- Artifact: `obs-33.0.3-native-mjpeg-win-dshow`.
+- Artifact SHA-256: `06553fda76c1a974e8610a00ac6a41ae6979aabee072ebfc3cc88226d11a3b64`.
+- DLL SHA-256: `EBD7B77E9DA422F9A6ED72BC4661C8387E8889D1BCC1D5EFD1BAC2FCF1ECF9AD`.
 
-Next CI task: add the required Visual Studio ATL component to the runner image (or use a runner/image that already includes it), rerun the target, then verify the actual `win-dshow.dll` output and SHA-256.
+The patch now serializes recorder initialization with capture callbacks and reports the measured source frame rate. The artifact is a successful OBS 33.0.3 Windows x64 build, not a camera-runtime certification. It still needs an OBS-side test with the actual MJPEG camera mode, audio source, MOV integrity and A/V synchronization before production use.
 
-## Code review risk before production
+The earlier OBS 33.0.1 build is historical evidence only; do not install that DLL into OBS 33.0.3.
 
-The current patch calls `device.Start()` before `NativeMjpegRecorder::Start()` in `DShowInput::Activate`. Encoded-frame callbacks may therefore begin while recorder setup is still mutating the format context, stream pointers and header state. `Active()`, `Write()` and `WriteAudio()` use a mutex, but `Start()` does not hold it over initialization. This is a plausible data race from source inspection, not a reproduced crash. Fix start ordering/locking and run concurrent callback/deactivate tests before production use.
+## Runtime validation still required
 
-Additional tests: non-ASCII Windows paths, source hide/show, deactivation/reactivation, stop while callbacks are running, long recordings, MOV integrity and audio/video synchronization.
-
-## Rules
+- Confirm the camera actually exposes MJPEG at 3840×2160 or higher.
+- Test recording with audio source present and absent.
+- Test start/stop, source hide/show, deactivation/reactivation and long recordings.
+- Check MOV integrity, timestamps, dropped-frame behavior and audio/video synchronization.
+- Test output directories containing non-ASCII characters.## Rules
 
 - Never install the OBS 33.0.1 DLL into OBS 33.0.3 and call it compatible.
 - Never replace the complete OBS installation with this one module; install only the validated DLL in the appropriate OBS 33 plugin folder.
