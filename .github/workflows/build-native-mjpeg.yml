@@ -20,6 +20,38 @@ jobs:
         run: |
           git clone --recursive --depth 1 --branch 33.0.3 https://github.com/obsproject/obs-studio.git obs-studio
 
+      - name: Install Visual C++ ATL headers required by OBS DirectShow dependencies
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe was not found on this runner" }
+
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw "A Visual Studio C++ x64 toolchain was not found" }
+
+          $hasAtl = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.ATL -property installationPath
+          if ($hasAtl) {
+            Write-Host "Visual C++ ATL component is already installed at $hasAtl"
+          } else {
+            $installer = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\setup.exe"
+            if (-not (Test-Path $installer)) { throw "Visual Studio Installer setup.exe was not found" }
+
+            $arguments = @(
+              "modify",
+              "--installPath", $vsPath,
+              "--add", "Microsoft.VisualStudio.Component.VC.ATL",
+              "--quiet", "--wait", "--norestart"
+            )
+            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "Visual Studio Installer failed to add ATL (exit code $($process.ExitCode))"
+            }
+          }
+
+          $atlPath = Get-ChildItem -Path $vsPath -Filter "atlcomcli.h" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $atlPath) { throw "ATL installation finished but atlcomcli.h is still missing" }
+          Write-Host "ATL headers found at $($atlPath.DirectoryName)"
+
       - name: Apply native MJPEG patch
         shell: pwsh
         run: |
