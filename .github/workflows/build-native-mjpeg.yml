@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2025
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - name: Checkout this repo
@@ -20,37 +20,22 @@ jobs:
         run: |
           git clone --recursive --depth 1 --branch 33.0.3 https://github.com/obsproject/obs-studio.git obs-studio
 
-      - name: Install MSVC 14.44 ATL headers required by OBS DirectShow dependencies
+      - name: Verify MSVC 14.44 ATL headers required by OBS DirectShow dependencies
         shell: pwsh
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path $vswhere)) { throw "vswhere.exe was not found on this runner" }
 
           $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vsPath) { throw "A Visual Studio C++ x64 toolchain was not found" }
-
-          $atlComponent = "Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL"
-          $hasAtl = & $vswhere -latest -products * -requires $atlComponent -property installationPath
-          if (-not $hasAtl) {
-            $installer = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\setup.exe"
-            if (-not (Test-Path $installer)) { throw "Visual Studio Installer setup.exe was not found" }
-
-            $arguments = @(
-              "modify",
-              "--installPath `"$vsPath`"",
-              "--add $atlComponent",
-              "--quiet",
-              "--norestart"
-            )
-            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
-            if ($process.ExitCode -ne 0) {
-              throw "Visual Studio Installer failed to add the MSVC 14.44 ATL component (exit code $($process.ExitCode))"
-            }
-          }
+          if (-not $vsPath) { throw "Visual Studio 2022 C++ x64 toolchain was not found" }
 
           $toolsetRoot = Join-Path $vsPath "VC\Tools\MSVC"
           $toolset = Get-ChildItem -Path $toolsetRoot -Directory | Where-Object { $_.Name -like "14.44.*" } | Select-Object -First 1
           if (-not $toolset) { throw "MSVC 14.44 toolset was not found at $toolsetRoot" }
+
+          $atlComponent = "Microsoft.VisualStudio.Component.VC.ATL"
+          $hasAtl = & $vswhere -latest -products * -requires $atlComponent -property installationPath
+          if (-not $hasAtl) { throw "The Visual Studio 2022 runner does not have the v143 ATL component installed" }
 
           $atlInclude = Join-Path $toolset.FullName "atlmfc\include"
           foreach ($header in @("atlcomcli.h", "atlstr.h")) {
@@ -82,10 +67,17 @@ jobs:
           if (-not (Select-String -Path "plugins/win-dshow/CMakeLists.txt" -Pattern "FFmpeg::avformat" -Quiet)) { throw "FFmpeg::avformat marker missing" }
           Write-Host "Patch markers confirmed."
 
-      - name: Configure OBS
+      - name: Configure OBS with matching VS 2022 v143 toolset
         shell: pwsh
         working-directory: obs-studio
         run: |
+          $presetPath = "CMakePresets.json"
+          $presetJson = [System.IO.File]::ReadAllText($presetPath)
+          $oldGenerator = '"generator": "Visual Studio 18 2026"'
+          $newGenerator = '"generator": "Visual Studio 17 2022"'
+          if (-not $presetJson.Contains($oldGenerator)) { throw "OBS 33.0.3 Windows preset did not contain the expected VS 2026 generator" }
+          $presetJson = $presetJson.Replace($oldGenerator, $newGenerator)
+          [System.IO.File]::WriteAllText($presetPath, $presetJson, [System.Text.UTF8Encoding]::new($false))
           cmake --preset windows-x64
 
       - name: Build win-dshow
