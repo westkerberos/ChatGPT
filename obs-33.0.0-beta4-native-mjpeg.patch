@@ -167,6 +167,8 @@ new file mode 100644
 +{
 +	Stop();
 +
++	std::unique_lock<std::mutex> lock(mutex_);
++
 +	if (width <= 0 || height <= 0 || frame_interval_value <= 0)
 +		return false;
 +
@@ -177,11 +179,15 @@ new file mode 100644
 +	}
 +
 +	int ret = avformat_alloc_output_context2(&format_, nullptr, "mov", filename_.c_str());
-+	if (ret < 0 || !format_)
++	if (ret < 0 || !format_) {
++		lock.unlock();
++		Stop();
 +		return false;
++	}
 +
 +	video_stream_ = avformat_new_stream(format_, nullptr);
 +	if (!video_stream_) {
++		lock.unlock();
 +		Stop();
 +		return false;
 +	}
@@ -222,6 +228,7 @@ new file mode 100644
 +		if (ret < 0) {
 +			if (audio_source)
 +				obs_source_release(audio_source);
++			lock.unlock();
 +			Stop();
 +			return false;
 +		}
@@ -231,6 +238,7 @@ new file mode 100644
 +	if (ret < 0) {
 +		if (audio_source)
 +			obs_source_release(audio_source);
++		lock.unlock();
 +		Stop();
 +		return false;
 +	}
@@ -261,12 +269,13 @@ new file mode 100644
 +		obs_source_release(audio_source);
 +	}
 +
-+	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at 60.000 fps -> %s",
-+	     width, height, filename_.c_str());
++	const double effective_fps = 10000000.0 / (double)frame_interval_value;
++	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at %.3f fps -> %s",
++	     width, height, effective_fps, filename_.c_str());
 +
 +	return true;
 +}
-+
+0
 +void NativeMjpegRecorder::Write(const uint8_t *data, size_t size, int64_t ts)
 +{
 +	std::lock_guard<std::mutex> lock(mutex_);
