@@ -35,15 +35,10 @@ jobs:
             $installer = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\setup.exe"
             if (-not (Test-Path $installer)) { throw "Visual Studio Installer setup.exe was not found" }
 
-            $arguments = @(
-              "modify",
-              "--installPath", $vsPath,
-              "--add", $atlComponent,
-              "--quiet", "--wait", "--norestart"
-            )
-            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
-            if ($process.ExitCode -ne 0) {
-              throw "Visual Studio Installer failed to add the MSVC 14.44 ATL component (exit code $($process.ExitCode))"
+            & $installer modify --installPath "$vsPath" --add "$atlComponent" --quiet --wait --norestart
+            $installerExitCode = $LASTEXITCODE
+            if ($installerExitCode -ne 0) {
+              throw "Visual Studio Installer failed to add the MSVC 14.44 ATL component (exit code $installerExitCode)"
             }
           }
 
