@@ -26,7 +26,7 @@ If the audio source is found, the patch adds PCM S16LE stereo audio. If not foun
 - Merged into maintenance repo `main`: `ae7cc2dbcf71a3f6be74579577d47fd90fa452b3`.
 - Latest Windows x64 workflow: [#46035805651](https://github.com/westkerberos/ChatGPT/actions/runs/46035805651).
 - Result: patch application, source-marker validation, CMake configuration, win-dshow compilation, DLL/PDB collection and artifact upload succeeded against OBS tag **33.0.3**.
-- Artifact: obs-33.0.3-native-mjpeg-win-dshow (artifact ID 15154069837).
+- Artifact: obs-33.0.3-native-mjpeg-win-dshow (latest verified artifact ID `15215599998`).
 - Artifact ZIP SHA-256: `88dff9f2b12b735370d5f7928fef91a8c476627c67a43f4b2e813b3777cd9cc6`.
 - DLL SHA-256: EBD7B77E9DA422F9A6ED72BC4661C8387E8889D1BCC1D5EFD1BAC2FCF1ECF9AD.
 
@@ -49,3 +49,4 @@ This is successful OBS 33.0.3 Windows x64 compilation/package evidence, not a ca
 - Never replace the complete OBS installation with this one module; install only the validated DLL in the appropriate OBS 33 plugin/core-module path.
 - Build against the exact OBS tag and toolchain in the workflow, and publish SHA-256 with each DLL.
 - Update the [complete WEST Gaming streaming stack document](https://github.com/westkerberos/obs-vertical-canvas/blob/main/docs/WEST-GAMING-STREAMING-STACK.md) whenever this module changes.
+- For future maintenance chats, start from the [WEST Gaming next-chat handoff](https://github.com/westkerberos/obs-vertical-canvas/blob/main/docs/NEW-CHAT-START-HERE.md).
