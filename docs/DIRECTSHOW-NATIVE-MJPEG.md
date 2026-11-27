@@ -3,7 +3,7 @@
 **Component:** OBS Studio Windows module win-dshow.dll  
 **Target:** OBS Studio 33.0.3 · Windows x64  
 **Current source branch:** obs-33.0.3-native-mjpeg  
-**Latest branch commit:** 44d9713aa7752a07e2414edbc16328db1f176b8c  
+**DirectShow patch source head:** `80c45786d1cb4659a364b17580d937aaeaa518dc` · **merged maintenance repo main:** `ae7cc2dbcf71a3f6be74579577d47fd90fa452b3`  
 **Patch file:** [obs-33.0.0-beta4-native-mjpeg.patch](../obs-33.0.0-beta4-native-mjpeg.patch)
 
 This is a DirectShow modification to OBS Studio itself. It is **not** an Aitum Vertical or Aitum Multistream plugin, and it is not the DroidCam plugin. Keep its source, build and release process independent from the two Aitum forks.
@@ -22,11 +22,12 @@ If the audio source is found, the patch adds PCM S16LE stereo audio. If not foun
 ## Latest OBS 33.0.3 build evidence
 
 - Branch: [obs-33.0.3-native-mjpeg](https://github.com/westkerberos/ChatGPT/tree/obs-33.0.3-native-mjpeg).
-- Latest branch commit: 44d9713aa7752a07e2414edbc16328db1f176b8c.
-- Latest workflow: [#45899269116](https://github.com/westkerberos/ChatGPT/actions/runs/45899269116).
+- Patch source head: `80c45786d1cb4659a364b17580d937aaeaa518dc` (documentation-only commit after the latest code change).
+- Merged into maintenance repo `main`: `ae7cc2dbcf71a3f6be74579577d47fd90fa452b3`.
+- Latest Windows x64 workflow: [#46035805651](https://github.com/westkerberos/ChatGPT/actions/runs/46035805651).
 - Result: patch application, source-marker validation, CMake configuration, win-dshow compilation, DLL/PDB collection and artifact upload succeeded against OBS tag **33.0.3**.
 - Artifact: obs-33.0.3-native-mjpeg-win-dshow (artifact ID 15154069837).
-- Artifact ZIP SHA-256: f4c23a9ed1ab4dc361588f7d9e3e8c5046700c66e19af4aefc8e1a08535a4785.
+- Artifact ZIP SHA-256: `88dff9f2b12b735370d5f7928fef91a8c476627c67a43f4b2e813b3777cd9cc6`.
 - DLL SHA-256: EBD7B77E9DA422F9A6ED72BC4661C8387E8889D1BCC1D5EFD1BAC2FCF1ECF9AD.
 
 The DLL hash was independently checked against the downloaded workflow artifact on 27 November 2026. The latest artifact's DLL hash matches the packaged SHA256.txt.
@@ -47,4 +48,4 @@ This is successful OBS 33.0.3 Windows x64 compilation/package evidence, not a ca
 - Never install the OBS 33.0.1 DLL into OBS 33.0.3 and call it compatible.
 - Never replace the complete OBS installation with this one module; install only the validated DLL in the appropriate OBS 33 plugin/core-module path.
 - Build against the exact OBS tag and toolchain in the workflow, and publish SHA-256 with each DLL.
-- Update the [complete WEST Gaming streaming stack document](https://github.com/westkerberos/obs-vertical-canvas/blob/release/obs33.0.3-vertical-1.6.8-west-stack-20261127/docs/WEST-GAMING-STREAMING-STACK.md) whenever this module changes.
+- Update the [complete WEST Gaming streaming stack document](https://github.com/westkerberos/obs-vertical-canvas/blob/main/docs/WEST-GAMING-STREAMING-STACK.md) whenever this module changes.
