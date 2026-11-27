@@ -1,15 +1,15 @@
 diff --git a/plugins/win-dshow/CMakeLists.txt b/plugins/win-dshow/CMakeLists.txt
 --- a/plugins/win-dshow/CMakeLists.txt
 +++ b/plugins/win-dshow/CMakeLists.txt
-@@ -1,5 +1,5 @@
+@@ -1,6 +1,6 @@
  cmake_minimum_required(VERSION 3.28...3.30)
  
--find_package(FFmpeg REQUIRED avcodec avutil)
-+find_package(FFmpeg REQUIRED avcodec avformat avutil)
+-find_package(FFmpeg 8.0 REQUIRED avcodec avutil)
++find_package(FFmpeg 8.0 REQUIRED avcodec avformat avutil)
  
  add_library(win-dshow MODULE)
  add_library(OBS::dshow ALIAS win-dshow)
-@@ -21,7 +21,7 @@ target_sources(
+@@ -21,5 +21,5 @@ target_sources(
    win-dshow
 -  PRIVATE dshow-plugin.cpp encode-dstr.hpp ffmpeg-decode.c ffmpeg-decode.h win-dshow-encoder.cpp win-dshow.cpp
 +  PRIVATE dshow-plugin.cpp encode-dstr.hpp ffmpeg-decode.c ffmpeg-decode.h mjpeg-recorder.cpp mjpeg-recorder.hpp win-dshow-encoder.cpp win-dshow.cpp
@@ -28,11 +28,14 @@ diff --git a/plugins/win-dshow/mjpeg-recorder.hpp b/plugins/win-dshow/mjpeg-reco
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.hpp
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,55 @@
 +#pragma once
++
++#include <obs.h>
 +
 +#include <cstddef>
 +#include <cstdint>
++#include <mutex>
 +#include <string>
 +
 +struct AVFormatContext;
@@ -40,45 +43,74 @@ new file mode 100644
 +
 +class NativeMjpegRecorder {
 +	AVFormatContext *format_ = nullptr;
-+	AVStream *stream_ = nullptr;
++	AVStream *video_stream_ = nullptr;
++	AVStream *audio_stream_ = nullptr;
++	obs_source_t *audio_source_ = nullptr;
 +	bool header_written_ = false;
-+	bool have_first_ts_ = false;
-+	int64_t first_ts_ = 0;
 +	int64_t frame_interval_ = 0;
++	int64_t frame_duration_ = 0;
++	bool have_first_video_ts_ = false;
++	int64_t first_video_ts_ = 0;
++	int64_t last_video_ts_ = 0;
++	int64_t last_video_pts_ = -1;
++	uint64_t frame_index_ = 0;
++	uint64_t audio_frame_index_ = 0;
++	bool audio_clock_started_ = false;
++	uint32_t audio_sample_rate_ = 48000;
++	bool diagnostic_have_first_ts_ = false;
++	int64_t diagnostic_first_ts_ = 0;
++	int64_t diagnostic_last_ts_ = 0;
++	uint64_t diagnostic_frame_count_ = 0;
++	uint64_t diagnostic_first_video_wall_ns_ = 0;
++	bool diagnostic_have_first_audio_ts_ = false;
++	uint64_t diagnostic_first_audio_ts_ = 0;
++	uint64_t diagnostic_last_audio_ts_ = 0;
 +	std::string filename_;
++	mutable std::mutex mutex_;
++
++	static void AudioCaptureCallback(void *param, obs_source_t *source, const struct audio_data *audio, bool muted);
++	void WriteAudio(const struct audio_data *audio, bool muted);
 +
 +public:
 +	~NativeMjpegRecorder();
 +
-+	bool Start(const char *directory, int width, int height, int64_t frame_interval);
++	bool Start(const char *directory, int width, int height, int64_t frame_interval, const char *audio_source_name);
 +	void Write(const uint8_t *data, size_t size, int64_t ts);
 +	void Stop();
 +
-+	bool Active() const { return format_ != nullptr; }
++	bool Active() const
++	{
++		std::lock_guard<std::mutex> lock(mutex_);
++		return format_ != nullptr;
++	}
 +};
 diff --git a/plugins/win-dshow/mjpeg-recorder.cpp b/plugins/win-dshow/mjpeg-recorder.cpp
 new file mode 100644
 --- /dev/null
 +++ b/plugins/win-dshow/mjpeg-recorder.cpp
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,420 @@
 +#include "mjpeg-recorder.hpp"
 +
 +#include <obs-module.h>
++#include <util/platform.h>
 +
++extern "C" {
 +#include <libavcodec/avcodec.h>
 +#include <libavformat/avformat.h>
 +#include <libavutil/avutil.h>
++}
 +
 +#include <windows.h>
 +
++#include <algorithm>
 +#include <climits>
-+#include <cstdio>
++#include <cmath>
 +#include <cstring>
 +#include <ctime>
 +#include <string>
 +
 +static constexpr AVRational DSHOW_TIME_BASE = {1, 10000000};
-+static constexpr AVRational OUTPUT_TIME_BASE = {1, 90000};
++static constexpr AVRational VIDEO_TIME_BASE = {1, 90000};
 +
 +static bool directory_exists(const char *directory)
 +{
@@ -119,14 +151,23 @@ new file mode 100644
 +	return {};
 +}
 +
++static int16_t float_to_s16(float value)
++{
++	value = std::clamp(value, -1.0f, 1.0f);
++	return (int16_t)std::lrintf(value * 32767.0f);
++}
++
 +NativeMjpegRecorder::~NativeMjpegRecorder()
 +{
 +	Stop();
 +}
 +
-+bool NativeMjpegRecorder::Start(const char *directory, int width, int height, int64_t frame_interval_value)
++bool NativeMjpegRecorder::Start(const char *directory, int width, int height, int64_t frame_interval_value,
++				 const char *audio_source_name)
 +{
 +	Stop();
++
++	std::unique_lock<std::mutex> lock(mutex_);
 +
 +	if (width <= 0 || height <= 0 || frame_interval_value <= 0)
 +		return false;
@@ -138,26 +179,56 @@ new file mode 100644
 +	}
 +
 +	int ret = avformat_alloc_output_context2(&format_, nullptr, "mov", filename_.c_str());
-+	if (ret < 0 || !format_)
-+		return false;
-+
-+	stream_ = avformat_new_stream(format_, nullptr);
-+	if (!stream_) {
++	if (ret < 0 || !format_) {
++		lock.unlock();
 +		Stop();
 +		return false;
 +	}
 +
-+	stream_->time_base = OUTPUT_TIME_BASE;
-+	stream_->avg_frame_rate = AVRational{10000000, (int)frame_interval_value};
-+	stream_->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-+	stream_->codecpar->codec_id = AV_CODEC_ID_MJPEG;
-+	stream_->codecpar->codec_tag = MKTAG('m', 'j', 'p', 'g');
-+	stream_->codecpar->width = width;
-+	stream_->codecpar->height = height;
++	video_stream_ = avformat_new_stream(format_, nullptr);
++	if (!video_stream_) {
++		lock.unlock();
++		Stop();
++		return false;
++	}
++
++	video_stream_->time_base = VIDEO_TIME_BASE;
++	video_stream_->avg_frame_rate = AVRational{10000000, (int)frame_interval_value};
++	video_stream_->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
++	video_stream_->codecpar->codec_id = AV_CODEC_ID_MJPEG;
++	video_stream_->codecpar->codec_tag = 0;
++	video_stream_->codecpar->width = width;
++	video_stream_->codecpar->height = height;
++
++	audio_sample_rate_ = 48000;
++	obs_audio_info audio_info{};
++	if (obs_get_audio_info(&audio_info) && audio_info.samples_per_sec > 0)
++		audio_sample_rate_ = audio_info.samples_per_sec;
++
++	const char *resolved_audio_name = (audio_source_name && *audio_source_name) ? audio_source_name : "Mic/Aux";
++	obs_source_t *audio_source = obs_get_source_by_name(resolved_audio_name);
++	if (audio_source) {
++		audio_stream_ = avformat_new_stream(format_, nullptr);
++		if (audio_stream_) {
++			audio_stream_->time_base = AVRational{1, (int)audio_sample_rate_};
++			audio_stream_->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
++			audio_stream_->codecpar->codec_id = AV_CODEC_ID_PCM_S16LE;
++			audio_stream_->codecpar->codec_tag = 0;
++			audio_stream_->codecpar->sample_rate = (int)audio_sample_rate_;
++			audio_stream_->codecpar->format = AV_SAMPLE_FMT_S16;
++			av_channel_layout_default(&audio_stream_->codecpar->ch_layout, 2);
++		}
++	} else {
++		blog(LOG_WARNING, "Native MJPEG recorder: audio source '%s' was not found; recording video only",
++		     resolved_audio_name);
++	}
 +
 +	if (!(format_->oformat->flags & AVFMT_NOFILE)) {
 +		ret = avio_open(&format_->pb, filename_.c_str(), AVIO_FLAG_WRITE);
 +		if (ret < 0) {
++			if (audio_source)
++				obs_source_release(audio_source);
++			lock.unlock();
 +			Stop();
 +			return false;
 +		}
@@ -165,29 +236,85 @@ new file mode 100644
 +
 +	ret = avformat_write_header(format_, nullptr);
 +	if (ret < 0) {
++		if (audio_source)
++			obs_source_release(audio_source);
++		lock.unlock();
 +		Stop();
 +		return false;
 +	}
 +
 +	header_written_ = true;
-+	have_first_ts_ = false;
-+	first_ts_ = 0;
++	diagnostic_have_first_ts_ = false;
++	diagnostic_first_ts_ = 0;
++	diagnostic_last_ts_ = 0;
++	diagnostic_frame_count_ = 0;
++	diagnostic_first_video_wall_ns_ = 0;
++	diagnostic_have_first_audio_ts_ = false;
++	diagnostic_first_audio_ts_ = 0;
++	diagnostic_last_audio_ts_ = 0;
++	have_first_video_ts_ = false;
++	first_video_ts_ = 0;
++	last_video_ts_ = 0;
++	last_video_pts_ = -1;
 +	frame_interval_ = frame_interval_value;
++	frame_duration_ = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, video_stream_->time_base);
++	frame_index_ = 0;
++	audio_frame_index_ = 0;
++	audio_clock_started_ = false;
 +
++	if (audio_source && audio_stream_) {
++		audio_source_ = audio_source;
++		obs_source_add_audio_capture_callback(audio_source_, AudioCaptureCallback, this);
++	} else if (audio_source) {
++		obs_source_release(audio_source);
++	}
++
++	const double effective_fps = 10000000.0 / (double)frame_interval_value;
 +	blog(LOG_INFO, "Native MJPEG recorder: started %dx%d at %.3f fps -> %s",
-+	     width, height, 10000000.0 / double(frame_interval_value), filename_.c_str());
++	     width, height, effective_fps, filename_.c_str());
 +
 +	return true;
 +}
-+
 +void NativeMjpegRecorder::Write(const uint8_t *data, size_t size, int64_t ts)
 +{
-+	if (!format_ || !header_written_ || !stream_ || !data || size == 0 || size > INT_MAX)
++	std::lock_guard<std::mutex> lock(mutex_);
++
++	if (!format_ || !header_written_ || !video_stream_ || !data || size == 0 || size > INT_MAX)
 +		return;
 +
-+	if (!have_first_ts_) {
-+		first_ts_ = ts;
-+		have_first_ts_ = true;
++	if (!diagnostic_have_first_ts_) {
++		diagnostic_first_ts_ = ts;
++		diagnostic_have_first_ts_ = true;
++		diagnostic_first_video_wall_ns_ = os_gettime_ns();
++	}
++	diagnostic_last_ts_ = ts;
++	++diagnostic_frame_count_;
++
++	if (!have_first_video_ts_) {
++		have_first_video_ts_ = true;
++		first_video_ts_ = ts;
++		last_video_ts_ = ts;
++		last_video_pts_ = -1;
++	} else if (ts <= last_video_ts_) {
++		blog(LOG_WARNING,
++		     "Native MJPEG recorder: non-monotonic DirectShow video timestamp, dropping frame ts=%lld last_ts=%lld",
++		     (long long)ts, (long long)last_video_ts_);
++		return;
++	}
++
++	const int64_t relative_ts = ts - first_video_ts_;
++	const int64_t pts = av_rescale_q(relative_ts, DSHOW_TIME_BASE, video_stream_->time_base);
++	int64_t duration = frame_duration_;
++	if (frame_index_ > 0)
++		duration = av_rescale_q(ts - last_video_ts_, DSHOW_TIME_BASE, video_stream_->time_base);
++	if (duration <= 0)
++		duration = frame_duration_;
++
++	if (last_video_pts_ >= 0 && pts <= last_video_pts_) {
++		blog(LOG_WARNING,
++		     "Native MJPEG recorder: non-monotonic rescaled video PTS, dropping frame pts=%lld last_pts=%lld",
++		     (long long)pts, (long long)last_video_pts_);
++		return;
 +	}
 +
 +	AVPacket *packet = av_packet_alloc();
@@ -200,25 +327,161 @@ new file mode 100644
 +	}
 +
 +	memcpy(packet->data, data, size);
-+	packet->stream_index = stream_->index;
-+
-+	const int64_t rel_ts = ts >= first_ts_ ? ts - first_ts_ : 0;
-+	packet->pts = av_rescale_q(rel_ts, DSHOW_TIME_BASE, stream_->time_base);
-+	packet->dts = packet->pts;
-+	packet->duration = av_rescale_q(frame_interval_, DSHOW_TIME_BASE, stream_->time_base);
++	packet->stream_index = video_stream_->index;
++	packet->pts = pts;
++	packet->dts = pts;
++	packet->duration = duration;
 +	packet->flags |= AV_PKT_FLAG_KEY;
 +
 +	const int ret = av_interleaved_write_frame(format_, packet);
-+	if (ret < 0)
-+		blog(LOG_WARNING, "Native MJPEG recorder: av_interleaved_write_frame failed: %d", ret);
++	if (ret < 0) {
++		blog(LOG_WARNING, "Native MJPEG recorder: video write failed: %d", ret);
++	} else {
++		last_video_ts_ = ts;
++		last_video_pts_ = pts;
++		++frame_index_;
++	}
++
++	av_packet_free(&packet);
++}
++
++void NativeMjpegRecorder::AudioCaptureCallback(void *param, obs_source_t *source,
++					       const struct audio_data *audio, bool muted)
++{
++	UNUSED_PARAMETER(source);
++
++	auto *recorder = static_cast<NativeMjpegRecorder *>(param);
++	if (recorder)
++		recorder->WriteAudio(audio, muted);
++}
++
++void NativeMjpegRecorder::WriteAudio(const struct audio_data *audio, bool muted)
++{
++	std::lock_guard<std::mutex> lock(mutex_);
++
++	if (!format_ || !header_written_ || !audio_stream_ || !audio || audio->frames == 0)
++		return;
++
++	if (!diagnostic_have_first_audio_ts_) {
++		diagnostic_first_audio_ts_ = audio->timestamp;
++		diagnostic_have_first_audio_ts_ = true;
++	}
++	diagnostic_last_audio_ts_ = audio->timestamp;
++
++	if (diagnostic_first_video_wall_ns_ == 0)
++		return;
++
++	const uint32_t total_frames = audio->frames;
++	uint32_t start_frame = 0;
++
++	if (!audio_clock_started_) {
++		if (audio->timestamp < diagnostic_first_video_wall_ns_) {
++			const uint64_t delta_ns = diagnostic_first_video_wall_ns_ - audio->timestamp;
++			const uint64_t skip_frames =
++				(delta_ns * (uint64_t)audio_sample_rate_ + 999999999ULL) / 1000000000ULL;
++			if (skip_frames >= total_frames)
++				return;
++			start_frame = (uint32_t)skip_frames;
++		}
++
++		const uint64_t actual_start_ns =
++			audio->timestamp + (uint64_t)start_frame * 1000000000ULL / (uint64_t)audio_sample_rate_;
++		const uint64_t relative_ns =
++			actual_start_ns > diagnostic_first_video_wall_ns_
++				? actual_start_ns - diagnostic_first_video_wall_ns_
++				: 0;
++
++		audio_frame_index_ = av_rescale_q((int64_t)relative_ns,
++								  AVRational{1, 1000000000},
++								  audio_stream_->time_base);
++	}
++
++	const uint32_t frames = total_frames - start_frame;
++	const size_t sample_count = (size_t)frames * 2;
++	if (sample_count > (size_t)INT_MAX / sizeof(int16_t))
++		return;
++
++	AVPacket *packet = av_packet_alloc();
++	if (!packet)
++		return;
++
++	const int packet_size = (int)(sample_count * sizeof(int16_t));
++	if (av_new_packet(packet, packet_size) < 0) {
++		av_packet_free(&packet);
++		return;
++	}
++
++	int16_t *dst = reinterpret_cast<int16_t *>(packet->data);
++	const float *left = audio->data[0]
++		? reinterpret_cast<const float *>(audio->data[0]) + start_frame
++		: nullptr;
++	const float *right = audio->data[1]
++		? reinterpret_cast<const float *>(audio->data[1]) + start_frame
++		: left;
++
++	if (!left) {
++		memset(dst, 0, (size_t)packet_size);
++	} else {
++		for (uint32_t i = 0; i < frames; ++i) {
++			const float l = muted ? 0.0f : left[i];
++			const float r = muted ? 0.0f : (right ? right[i] : left[i]);
++			dst[(size_t)i * 2] = float_to_s16(l);
++			dst[(size_t)i * 2 + 1] = float_to_s16(r);
++		}
++	}
++
++	packet->stream_index = audio_stream_->index;
++	packet->pts = audio_frame_index_;
++	packet->dts = audio_frame_index_;
++	packet->duration = (int64_t)frames;
++	packet->flags |= AV_PKT_FLAG_KEY;
++
++	const int ret = av_interleaved_write_frame(format_, packet);
++	if (ret < 0) {
++		blog(LOG_WARNING, "Native MJPEG recorder: audio write failed: %d", ret);
++	} else {
++		audio_clock_started_ = true;
++		audio_frame_index_ += frames;
++	}
 +
 +	av_packet_free(&packet);
 +}
 +
 +void NativeMjpegRecorder::Stop()
 +{
++	obs_source_t *audio_source = audio_source_;
++	audio_source_ = nullptr;
++
++	if (audio_source) {
++		obs_source_remove_audio_capture_callback(audio_source, AudioCaptureCallback, this);
++		obs_source_release(audio_source);
++	}
++
++	std::lock_guard<std::mutex> lock(mutex_);
++
 +	if (!format_)
 +		return;
++
++	if (diagnostic_have_first_ts_ && diagnostic_last_ts_ >= diagnostic_first_ts_) {
++		const double elapsed = double(diagnostic_last_ts_ - diagnostic_first_ts_) / 10000000.0;
++		const double effective_fps = diagnostic_frame_count_ > 1 && elapsed > 0.0
++			? double(diagnostic_frame_count_ - 1) / elapsed
++			: 0.0;
++		blog(LOG_INFO,
++		     "Native MJPEG recorder: DIAG frames=%llu first_ts=%lld last_ts=%lld elapsed=%.6f effective_fps=%.3f",
++		     (unsigned long long)diagnostic_frame_count_,
++		     (long long)diagnostic_first_ts_,
++		     (long long)diagnostic_last_ts_, elapsed, effective_fps);
++	}
++
++	if (diagnostic_have_first_audio_ts_ && diagnostic_first_video_wall_ns_ > 0) {
++		const double first_audio_delta_ms =
++			(double)((int64_t)diagnostic_first_audio_ts_ - (int64_t)diagnostic_first_video_wall_ns_) / 1000000.0;
++		blog(LOG_INFO,
++		     "Native MJPEG recorder: DIAG audio_first=%llu audio_last=%llu first_audio_minus_first_video_wall=%.3f ms",
++		     (unsigned long long)diagnostic_first_audio_ts_,
++		     (unsigned long long)diagnostic_last_audio_ts_, first_audio_delta_ms);
++	}
 +
 +	if (header_written_)
 +		av_write_trailer(format_);
@@ -228,11 +491,26 @@ new file mode 100644
 +
 +	avformat_free_context(format_);
 +	format_ = nullptr;
-+	stream_ = nullptr;
++	video_stream_ = nullptr;
++	audio_stream_ = nullptr;
 +	header_written_ = false;
-+	have_first_ts_ = false;
-+	first_ts_ = 0;
 +	frame_interval_ = 0;
++	frame_duration_ = 0;
++	have_first_video_ts_ = false;
++	first_video_ts_ = 0;
++	last_video_ts_ = 0;
++	last_video_pts_ = -1;
++	frame_index_ = 0;
++	audio_frame_index_ = 0;
++	audio_clock_started_ = false;
++	diagnostic_have_first_ts_ = false;
++	diagnostic_first_ts_ = 0;
++	diagnostic_last_ts_ = 0;
++	diagnostic_frame_count_ = 0;
++	diagnostic_first_video_wall_ns_ = 0;
++	diagnostic_have_first_audio_ts_ = false;
++	diagnostic_first_audio_ts_ = 0;
++	diagnostic_last_audio_ts_ = 0;
 +
 +	if (!filename_.empty())
 +		blog(LOG_INFO, "Native MJPEG recorder: stopped -> %s", filename_.c_str());
@@ -258,7 +536,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  	bool deactivateWhenNotShowing = false;
  	bool deviceHasAudio = false;
  	bool deviceHasSeparateAudioFilter = false;
-@@ -452,6 +454,8 @@
+@@ -452,5 +454,8 @@
  void DShowInput::OnEncodedVideoData(enum AVCodecID id, unsigned char *data, size_t size, long long ts)
  {
 +	if (id == AV_CODEC_ID_MJPEG && mjpeg_recorder.Active())
@@ -267,7 +545,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  	/* If format or hw decode changes, recreate the decoder */
  	if (ffmpeg_decode_valid(video_decoder) &&
  	    ((video_decoder->codec->id != id) || (video_decoder->hw != hw_decode))) {
-@@ -1054,6 +1058,8 @@
+@@ -1054,5 +1058,7 @@
  inline bool DShowInput::Activate(obs_data_t *settings)
  {
 +	mjpeg_recorder.Stop();
@@ -275,7 +553,7 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
  	if (!device.ResetGraph()) {
  		obs_source_set_audio_active(source, false);
  		return false;
-@@ -1076,6 +1082,11 @@
+@@ -1076,6 +1082,13 @@
  	if (device.Start() != Result::Success) {
  		return false;
  	}
@@ -284,25 +562,27 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
 +	    videoConfig.format == VideoFormat::MJPEG &&
 +	    videoConfig.cx >= 3840 && videoConfig.cy_abs >= 2160) {
 +		mjpeg_recorder.Start(obs_data_get_string(settings, "native_mjpeg_record_dir"),
-+				     videoConfig.cx, videoConfig.cy_abs, videoConfig.frameInterval);
++				     videoConfig.cx, videoConfig.cy_abs, videoConfig.frameInterval,
++				     obs_data_get_string(settings, "native_mjpeg_audio_source"));
 +	}
  
  	cs = GetColorSpace(settings);
  	const enum video_range_type range = GetColorRange(settings);
-@@ -1111,6 +1122,7 @@
+@@ -1111,5 +1122,6 @@
  inline void DShowInput::Deactivate()
  {
 +	mjpeg_recorder.Stop();
  	device.ResetGraph();
  	obs_source_output_video2(source, nullptr);
  }
-@@ -1164,6 +1176,8 @@
+@@ -1164,3 +1176,5 @@
  	obs_data_set_default_bool(settings, AUTOROTATION, true);
  	obs_data_set_default_bool(settings, HW_DECODE, false);
 +	obs_data_set_default_bool(settings, "native_mjpeg_record", false);
 +	obs_data_set_default_string(settings, "native_mjpeg_record_dir", "");
++	obs_data_set_default_string(settings, "native_mjpeg_audio_source", "Mic/Aux");
  }
-@@ -1859,6 +1873,12 @@
+@@ -1859,6 +1873,11 @@
  	obs_properties_add_bool(ppts, AUTOROTATION, TEXT_AUTOROTATION);
  
  	obs_properties_add_bool(ppts, HW_DECODE, TEXT_HW_DECODE);
@@ -311,13 +591,16 @@ diff --git a/plugins/win-dshow/win-dshow.cpp b/plugins/win-dshow/win-dshow.cpp
 +	obs_properties_add_path(ppts, "native_mjpeg_record_dir",
 +				"Native MJPEG output directory",
 +				OBS_PATH_DIRECTORY, nullptr, nullptr);
++	obs_properties_add_text(ppts, "native_mjpeg_audio_source",
++				"Native audio source (default: Mic/Aux)",
++				OBS_TEXT_DEFAULT);
  
  	/* ------------------------------------- */
  	/* audio settings */
 diff --git a/plugins/win-dshow/data/locale/en-US.ini b/plugins/win-dshow/data/locale/en-US.ini
 --- a/plugins/win-dshow/data/locale/en-US.ini
 +++ b/plugins/win-dshow/data/locale/en-US.ini
-@@ -25,6 +25,8 @@
+@@ -25,7 +25,9 @@
  Autorotation="Apply rotation data from camera (if any)"
  HardwareDecode="Use hardware decoding when available"
  DeactivateWhenNotShowing="Deactivate when not showing"
